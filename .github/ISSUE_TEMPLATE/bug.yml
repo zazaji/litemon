@@ -1,0 +1,20 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include expected and actual behavior.
+    validations: {required: true}
+  - type: textarea
+    attributes:
+      label: Diagnostics
+      description: Paste `litemon-collector --diagnostics` and relevant `--snapshot` output. Remove anything you do not want to share.
+  - type: input
+    attributes: {label: Distribution / kernel}
+  - type: input
+    attributes: {label: GPU / driver}
+  - type: textarea
+    attributes: {label: Reproduction steps}

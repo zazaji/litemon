@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.litemon.LiteMon</id>
+  <name>LiteMon</name>
+  <summary>Lightweight local historical system monitor</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>LiteMon is a local-first Qt 6 monitor for Linux desktops. It records CPU, memory, storage, network, battery, Intel GPU and NVIDIA GPU history into a bounded SQLite database.</p>
+  </description>
+  <launchable type="desktop-id">io.github.litemon.LiteMon.desktop</launchable>
+  <provides><binary>litemon</binary></provides>
+  <categories><category>System</category><category>Monitor</category></categories>
+  <releases><release version="2.0.0" date="2026-09-16"/></releases>
+</component>

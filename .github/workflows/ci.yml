@@ -1,0 +1,89 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    name: Debian 13 / GCC
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite python3 shellcheck
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release -j2
+      - name: Test
+        run: ctest --test-dir build/release --output-on-failure
+      - name: Script checks
+        run: shellcheck scripts/*.sh
+      - name: Package
+        run: cpack --config build/release/CPackConfig.cmake
+
+  clang:
+    name: Debian 13 / Clang
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y clang cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite
+      - run: CC=clang CXX=clang++ cmake --preset dev
+      - run: cmake --build --preset dev -j2
+      - run: ctest --preset dev
+
+  sanitizers:
+    name: Sanitizers
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    strategy:
+      matrix:
+        preset: [asan, ubsan]
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite
+      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --build --preset ${{ matrix.preset }} -j2
+      - run: ctest --preset ${{ matrix.preset }}
+
+  macos:
+    name: macOS / Qt6
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt6
+        run: brew install qt@6
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+      - name: Build
+        run: cmake --build build -j2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows / MSVC
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.2'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          modules: 'qtsql'
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --config Release -j2
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure

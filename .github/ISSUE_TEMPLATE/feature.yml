@@ -1,0 +1,18 @@
+name: Feature request
+description: Propose a focused improvement
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What user problem should LiteMon solve?
+    validations: {required: true}
+  - type: textarea
+    attributes:
+      label: Proposed behavior
+    validations: {required: true}
+  - type: textarea
+    attributes:
+      label: Lightweight impact
+      description: Explain expected background CPU, memory, I/O and dependency impact.

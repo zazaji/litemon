@@ -1,0 +1,161 @@
+# LiteMon 2.0
+
+[![CI](https://github.com/user/litemon/actions/workflows/ci.yml/badge.svg)](https://github.com/user/litemon/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+LiteMon is a lightweight, **single-machine**, local-first historical monitor for Linux desktops. It is designed for users who want useful long-term CPU/GPU/memory/network/storage/battery history without running Prometheus, Grafana, containers, a web server, or a remote service.
+
+![LiteMon Screenshot](docs/screenshot.png)
+
+## Highlights
+
+- Native **C++20 + Qt 6 Widgets** UI; no WebEngine/QML dependency.
+- Small `litemon-collector` background process; GUI runs only when opened.
+- SQLite WAL database with bounded retention and downsampling.
+- CPU, load, temperature, memory, swap, network throughput, disk throughput and root filesystem usage.
+- Laptop battery level, state, charge/discharge power and health.
+- **NVIDIA** GPU utilization, VRAM, temperature, power and graphics clock via `nvidia-smi`.
+- **Intel** GPU support through DRM/sysfs, `xpu-smi` for Xe/Arc where available, and `intel_gpu_top -J` fallback.
+- Hybrid Intel + NVIDIA laptops are represented as separate devices with separate history.
+- NVIDIA runtime-suspend protection: sleeping Optimus dGPUs are not polled with `nvidia-smi` merely to draw a chart.
+- CSV export, diagnostics JSON, database health check, settings, schema versioning and configurable retention.
+- Debian 13-focused systemd user service, AppStream metadata, CPack packaging and CI.
+
+## Architecture
+
+```text
+/proc  /sys  DRM  nvidia-smi  xpu-smi  intel_gpu_top
+   \     |     |       |         |          /
+                litemon_core
+          collectors · parsing · DB
+                     |
+          SQLite WAL + downsampling
+             /                 \
+ litemon-collector              litemon
+ Qt Core + Qt SQL              Qt Widgets GUI
+ always-on, low priority       open only when needed
+```
+
+The collector defaults to a 5-second system interval and 10-second GPU interval. Retention defaults are:
+
+- fine detail: last 7 calendar days (minimum 6)
+- compressed 5-minute averages: 365 days
+
+All can be changed from **Edit → Settings** or `~/.config/litemon/litemon.ini`.
+
+## Debian 13 quick start
+
+```bash
+sudo apt install build-essential cmake ninja-build qt6-base-dev libqt6sql6-sqlite
+```
+
+Optional Intel GPU detail:
+
+```bash
+sudo apt install intel-gpu-tools
+```
+
+NVIDIA metrics use the normal driver-provided `nvidia-smi`. Intel Xe/Arc can additionally use `xpu-smi` when installed.
+
+Build, test and install for the current user:
+
+```bash
+./scripts/install.sh
+```
+
+Launch:
+
+```bash
+litemon
+```
+
+Collector status:
+
+```bash
+systemctl --user status litemon-collector.service
+journalctl --user -u litemon-collector.service -f
+```
+
+## Diagnostics
+
+One-shot hardware snapshot:
+
+```bash
+litemon-collector --snapshot
+```
+
+Runtime diagnostic report:
+
+```bash
+litemon-collector --diagnostics
+```
+
+Database and runtime health check:
+
+```bash
+litemon-collector --health-check
+```
+
+The GUI can also save a diagnostics JSON file from **File → Save diagnostics…**.
+
+## Stable local paths
+
+LiteMon follows the XDG base-directory convention and intentionally does not derive data paths from Qt organization metadata:
+
+```text
+~/.local/share/litemon/metrics.sqlite
+~/.config/litemon/litemon.ini
+~/.cache/litemon/collector.lock
+```
+
+`XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are respected.
+
+## Development
+
+```bash
+cmake --preset dev
+cmake --build --preset dev
+ctest --preset dev
+```
+
+Sanitizers:
+
+```bash
+cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+cmake --preset ubsan && cmake --build --preset ubsan && ctest --preset ubsan
+```
+
+Release build:
+
+```bash
+cmake --preset release
+cmake --build --preset release
+cpack --config build/release/CPackConfig.cmake
+```
+
+See [Architecture](docs/ARCHITECTURE.md), [GPU compatibility](docs/GPU.md), [Testing](docs/TESTING.md), [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md).
+
+## Project principles
+
+1. **Local-first**: no account, cloud, telemetry or external database.
+2. **Low idle cost**: never wake hardware simply to monitor it when avoidable.
+3. **Truth over decoration**: unsupported hardware readings remain unknown instead of fabricated.
+4. **Bounded storage**: long history must not grow without limit.
+5. **Graceful degradation**: missing GPU tools, sensors or battery fields must never break ordinary monitoring.
+6. **Native Linux semantics**: `/proc`, `/sys`, DRM and systemd are first-class interfaces.
+
+## Cross-platform status
+
+| Platform | GUI | Collector | Status |
+|----------|-----|-----------|--------|
+| Linux (Debian 13) | ✅ | ✅ | Fully supported |
+| macOS | 🔨 | ❌ | GUI compiles; collector needs porting (sysctl/IOKit) |
+| Windows | 🔨 | ❌ | GUI compiles; collector needs porting (WMI/Performance Counters) |
+
+The Qt6 Widgets GUI is cross-platform and compiles on macOS/Windows via GitHub Actions.
+The system collector currently reads Linux-specific interfaces (`/proc`, `/sys`, DRM, `nvidia-smi`).
+Porting the collector to macOS (sysctl, IOKit) and Windows (WMI, PDH) is planned.
+
+## License
+
+MIT. See `LICENSE`.

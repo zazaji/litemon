@@ -1,0 +1,22 @@
+#pragma once
+
+#include <QString>
+
+struct AppConfig {
+    // Minimum sampling cadence is 60 seconds: finer sampling multiplies
+    // database growth (per-core rows scale with core count) while adding no
+    // useful signal to minute-scale history charts.
+    int sampleIntervalSec = 60;
+    int gpuIntervalSec = 60;
+    // Fine-grained detail rows: calendar days kept (minimum 6).
+    int detailRetentionDays = 7;
+    // Compressed 5-minute-average archive: days kept.
+    int archiveRetentionDays = 365;
+    int maintenanceIntervalSec = 60;
+    int historyTargetPoints = 900;
+    bool collectGpu = true;
+
+    static AppConfig load();
+    void save() const;
+    static QString configPath();
+};

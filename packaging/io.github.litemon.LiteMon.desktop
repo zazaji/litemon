@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LiteMon
+Comment=Lightweight local Linux system history monitor
+Exec=litemon
+Icon=io.github.litemon.LiteMon
+Terminal=false
+Categories=System;Monitor;
+Keywords=CPU;GPU;NVIDIA;Intel;Battery;Monitor;History;
+StartupNotify=true

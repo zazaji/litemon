@@ -1,0 +1,27 @@
+name: Quality
+on:
+  push:
+  pull_request:
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Whitespace and repository hygiene
+        run: |
+          git diff --check HEAD^
+          test -f .clang-format
+          test -f .clang-tidy
+          test -f SECURITY.md
+          test -f CONTRIBUTING.md
+
+  static-analysis:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y clang-tidy clang cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite
+      - run: CC=clang CXX=clang++ cmake --preset dev
+      - run: run-clang-tidy -p build/dev -quiet
