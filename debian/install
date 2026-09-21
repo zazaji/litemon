@@ -1,0 +1,6 @@
+litemon usr/bin
+litemon-collector usr/bin
+packaging/io.github.litemon.LiteMon.desktop usr/share/applications
+packaging/io.github.litemon.LiteMon.metainfo.xml usr/share/metainfo
+packaging/io.github.litemon.LiteMon.svg usr/share/icons/hicolor/scalable/apps
+packaging/litemon-collector.service usr/lib/systemd/system

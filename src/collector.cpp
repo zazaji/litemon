@@ -187,11 +187,64 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
     m.batteryStatus = statuses.join(" + ");
 }
 
-void SystemCollector::collectDiskSpace(SystemMetric &m) const {
-    QStorageInfo root = QStorageInfo::root();
-    if (!root.isValid() || !root.isReady()) return;
-    m.diskTotalGiB = static_cast<double>(root.bytesTotal()) / 1073741824.0;
-    m.diskUsedGiB = static_cast<double>(root.bytesTotal() - root.bytesAvailable()) / 1073741824.0;
+// For dedup: prefer "/" over any other mount point of the same device,
+// then the shortest path (bind-mount aliases like /home or /var/tmp of the
+// root filesystem would repeat identical numbers in the UI).
+static bool preferMount(const QString &a, const QString &b) {
+    if (a == "/") return b != "/";
+    if (b == "/") return false;
+    if (a.size() != b.size()) return a.size() < b.size();
+    return a < b;
+}
+
+void SystemCollector::collectDisks(SystemMetric &m) const {
+    // Parse /proc/mounts directly instead of QStorageInfo::mountedVolumes()
+    // because the latter calls stat() on every mount point, which blocks on
+    // unreachable network mounts (CIFS/NFS).
+    const QStringList skipFs = {"tmpfs", "devtmpfs", "sysfs", "proc", "devpts", "cgroup", "cgroup2", "pstore", "securityfs", "debugfs", "tracefs", "fusectl", "configfs", "hugetlbfs", "mqueue", "binfmt_misc", "autofs", "rpc_pipefs", "nfsd", "overlay", "efivarfs"};
+    QHash<QString, DiskInfo> byDevice;
+    QFile f("/proc/mounts");
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QString content = QString::fromUtf8(f.readAll());
+        const auto lines = content.split('\n');
+        for (const auto &line : lines) {
+            const auto fields = line.split(' ');
+            if (fields.size() < 3) continue;
+            const QString mount = fields[1];
+            const QString fsType = fields[2];
+            if (skipFs.contains(fsType, Qt::CaseInsensitive)) continue;
+            if (mount.startsWith("/boot/efi") || mount.startsWith("/sys/") || mount.startsWith("/var/lib/waydroid")) continue;
+            // Use QStorageInfo only for the specific mount, not all volumes
+            QStorageInfo vol(mount);
+            if (!vol.isValid() || !vol.isReady()) continue;
+            DiskInfo di;
+            di.mountPoint = mount;
+            di.totalGiB = static_cast<double>(vol.bytesTotal()) / 1073741824.0;
+            di.usedGiB = static_cast<double>(vol.bytesTotal() - vol.bytesAvailable()) / 1073741824.0;
+            if (di.totalGiB <= 0) continue;
+            const QString dev = QString::fromLocal8Bit(vol.device());
+            const auto it = byDevice.find(dev);
+            if (it == byDevice.end()) { byDevice.insert(dev, di); }
+            else if (preferMount(mount, it->mountPoint)) { it->mountPoint = mount; }
+        }
+    }
+    m.disks.clear();
+    for (const auto &d : byDevice) { m.disks.append(d); }
+    // Fallback when /proc/mounts was unreadable: at least show root.
+    if (m.disks.isEmpty()) {
+        QStorageInfo root = QStorageInfo::root();
+        if (root.isValid() && root.isReady()) {
+            DiskInfo di;
+            di.mountPoint = "/";
+            di.totalGiB = static_cast<double>(root.bytesTotal()) / 1073741824.0;
+            di.usedGiB = static_cast<double>(root.bytesTotal() - root.bytesAvailable()) / 1073741824.0;
+            if (di.totalGiB > 0) m.disks.append(di);
+        }
+    }
+    std::stable_sort(m.disks.begin(), m.disks.end(), [](const DiskInfo &a, const DiskInfo &b) {
+        if ((a.mountPoint == "/") != (b.mountPoint == "/")) { return a.mountPoint == "/"; }
+        return a.mountPoint < b.mountPoint;
+    });
 }
 
 SystemCollector::IoCounters SystemCollector::readNetworkCounters() const {
@@ -220,10 +273,10 @@ SystemCollector::IoCounters SystemCollector::readNetworkCounters() const {
     return {rx, tx, true};
 }
 
-SystemCollector::IoCounters SystemCollector::readDiskCounters() const {
+QVector<SystemCollector::DiskIoCounters> SystemCollector::readDiskCounters() const {
     QFile f("/proc/diskstats");
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
-    quint64 readSectors = 0, writeSectors = 0;
+    QVector<DiskIoCounters> result;
     // NOTE: /proc files report size 0, so atEnd() cannot drive the loop.
     const QString content = QString::fromUtf8(f.readAll());
     const auto lines = content.split('\n');
@@ -236,10 +289,11 @@ SystemCollector::IoCounters SystemCollector::readDiskCounters() const {
         bool ok1=false, ok2=false;
         const quint64 r = fields[5].toULongLong(&ok1);
         const quint64 w = fields[9].toULongLong(&ok2);
-        if (ok1) { readSectors += r; }
-        if (ok2) { writeSectors += w; }
+        if (ok1 && ok2) {
+            result.append({dev, r, w});
+        }
     }
-    return {readSectors, writeSectors, true};
+    return result;
 }
 
 SystemMetric SystemCollector::collect(bool includeGpu) {
@@ -274,19 +328,32 @@ SystemMetric SystemCollector::collect(bool includeGpu) {
     }
     lastNetwork_ = net;
 
-    const auto disk = readDiskCounters();
-    if (disk.valid && lastDisk_.valid && disk.a >= lastDisk_.a && disk.b >= lastDisk_.b) {
-        m.diskReadMiBs = static_cast<double>(disk.a - lastDisk_.a) * 512.0 / 1048576.0 / seconds;
-        m.diskWriteMiBs = static_cast<double>(disk.b - lastDisk_.b) * 512.0 / 1048576.0 / seconds;
+    // Per-disk I/O: compute total from all physical block devices
+    const auto diskIo = readDiskCounters();
+    quint64 totalRead = 0, totalWrite = 0;
+    for (const auto &d : diskIo) {
+        totalRead += d.readSectors;
+        totalWrite += d.writeSectors;
     }
-    lastDisk_ = disk;
+    if (lastDisk_.size() > 0) {
+        quint64 lastRead = 0, lastWrite = 0;
+        for (const auto &d : lastDisk_) {
+            lastRead += d.readSectors;
+            lastWrite += d.writeSectors;
+        }
+        if (totalRead >= lastRead && totalWrite >= lastWrite) {
+            m.diskReadMiBs = static_cast<double>(totalRead - lastRead) * 512.0 / 1048576.0 / seconds;
+            m.diskWriteMiBs = static_cast<double>(totalWrite - lastWrite) * 512.0 / 1048576.0 / seconds;
+        }
+    }
+    lastDisk_ = diskIo;
     rateTimer_.restart();
 
     collectMemory(m);
     collectLoad(m);
     collectTemperature(m);
     collectBattery(m);
-    collectDiskSpace(m);
+    collectDisks(m);
     if (includeGpu) m.gpus = gpuCollector_.collect();
     return m;
 }

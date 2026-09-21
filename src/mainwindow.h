@@ -24,6 +24,7 @@ private slots:
     void refreshLatest();
     void refreshHistory();
     void gpuSelectionChanged();
+    void diskSelectionChanged();
     void showSettings();
     void saveDiagnostics();
     void exportCurrentCsv();
@@ -51,12 +52,16 @@ private:
     QComboBox *gpuSelector_=nullptr;
     QLabel *updated_=nullptr;
     QLabel *dbStatus_=nullptr;
-    Card cpuCard_,memCard_,diskCard_,netCard_,batteryCard_;
+    Card cpuCard_,memCard_,netCard_,batteryCard_;
     QHash<QString,Card> gpuCards_;
     QWidget *gpuCardsContainer_=nullptr;
     QGridLayout *gpuCardsLayout_=nullptr;
+    QHash<QString,Card> diskCards_;
+    QWidget *diskCardsContainer_=nullptr;
+    QGridLayout *diskCardsLayout_=nullptr;
 
-    ChartWidget *cpuUsage_=nullptr,*cpuTemp_=nullptr,*mem_=nullptr,*swap_=nullptr,*net_=nullptr,*diskIo_=nullptr,*diskSpace_=nullptr,*battery_=nullptr,*batteryPower_=nullptr,*gpuUsage_=nullptr,*gpuAux_=nullptr,*gpuMemory_=nullptr;
+    ChartWidget *cpuUsage_=nullptr,*cpuTemp_=nullptr,*mem_=nullptr,*swap_=nullptr,*net_=nullptr,*diskIo_=nullptr,*diskUsage_=nullptr,*battery_=nullptr,*batteryPower_=nullptr,*gpuUsage_=nullptr,*gpuAux_=nullptr,*gpuMemory_=nullptr;
+    QComboBox *diskSelector_=nullptr;
     QLabel *cpuCoresLabel_=nullptr;
     QScrollArea *cpuCoresScroll_=nullptr;
     QGridLayout *cpuCoresLayout_=nullptr;

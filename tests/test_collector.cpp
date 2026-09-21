@@ -34,7 +34,6 @@ int main(int argc, char **argv) {
     ok = checkFinite(m.memoryTotalMiB, "memoryTotalMiB", true) && ok;
     ok = checkFinite(m.memoryUsedMiB, "memoryUsedMiB", true) && ok;
     ok = checkFinite(m.load1, "load1", true) && ok;
-    ok = checkFinite(m.diskTotalGiB, "diskTotalGiB", true) && ok;
     // Swap may be zero-sized on some machines, but when present it must parse.
     // Rates are expected to be finite (possibly 0) after two samples.
     ok = checkFinite(m.networkRxMiBs, "networkRxMiBs", true) && ok;

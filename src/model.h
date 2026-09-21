@@ -20,6 +20,15 @@ struct GpuMetric {
     double frequencyMHz = lmNaN();
 };
 
+struct DiskInfo {
+    qint64 timestamp = 0;
+    QString mountPoint;
+    double totalGiB = lmNaN();
+    double usedGiB = lmNaN();
+    double readMiBs = lmNaN();
+    double writeMiBs = lmNaN();
+};
+
 struct SystemMetric {
     qint64 timestamp = 0;
     double cpuUsage = lmNaN();
@@ -36,8 +45,7 @@ struct SystemMetric {
     double networkTxMiBs = lmNaN();
     double diskReadMiBs = lmNaN();
     double diskWriteMiBs = lmNaN();
-    double diskUsedGiB = lmNaN();
-    double diskTotalGiB = lmNaN();
+    QVector<DiskInfo> disks;
     double batteryPercent = lmNaN();
     double batteryPowerW = lmNaN();
     double batteryHealthPercent = lmNaN();

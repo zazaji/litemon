@@ -17,20 +17,22 @@ private:
 
     struct IoCounters { quint64 a = 0; quint64 b = 0; bool valid = false; };
 
+    struct DiskIoCounters { QString device; quint64 readSectors = 0; quint64 writeSectors = 0; };
+
     CpuTicks readCpuTicks() const;
     QMap<int, CpuTicks> readCpuCoreTicks() const;
     void collectMemory(SystemMetric &m) const;
     void collectLoad(SystemMetric &m) const;
     void collectTemperature(SystemMetric &m) const;
     void collectBattery(SystemMetric &m) const;
-    void collectDiskSpace(SystemMetric &m) const;
+    void collectDisks(SystemMetric &m) const;
     IoCounters readNetworkCounters() const;
-    IoCounters readDiskCounters() const;
+    QVector<DiskIoCounters> readDiskCounters() const;
 
     CpuTicks lastCpu_;
     QMap<int, CpuTicks> lastCores_;
     IoCounters lastNetwork_;
-    IoCounters lastDisk_;
+    QVector<DiskIoCounters> lastDisk_;
     QElapsedTimer rateTimer_;
     GpuCollector gpuCollector_;
 };

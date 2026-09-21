@@ -28,6 +28,8 @@ public:
     QVector<CpuCoreSample> cpuCoreHistory(qint64 from, qint64 to, int targetPoints = 900) const;
     QStringList gpuIds(bool signalOnly = false) const;
     QString gpuName(const QString &id) const;
+    QStringList diskMountPoints() const;
+    QVector<DiskInfo> diskHistory(const QString &mountPoint, qint64 from, qint64 to, int targetPoints = 900) const;
     QString path() const { return path_; }
     int schemaVersion() const;
     bool integrityCheck(QString *error = nullptr) const;

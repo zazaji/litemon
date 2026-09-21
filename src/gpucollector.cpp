@@ -17,9 +17,13 @@ QVector<GpuMetric> GpuCollector::collect() {
     QVector<GpuMetric> out;
     auto intel = collectIntel();
     auto nvidia = collectNvidia();
-    out.reserve(intel.size() + nvidia.size());
+    auto amd = collectAmd();
+    auto npu = collectHuawei();
+    out.reserve(intel.size() + nvidia.size() + amd.size() + npu.size());
     for (auto &g : intel) out.push_back(g);
     for (auto &g : nvidia) out.push_back(g);
+    for (auto &g : amd) out.push_back(g);
+    for (auto &g : npu) out.push_back(g);
     return out;
 }
 
@@ -208,7 +212,7 @@ GpuMetric GpuCollector::collectIntelCard(const QString &cardPath, const QString 
     for (const QString &p : {cardPath + "/device/gpu_busy_percent", cardPath + "/gpu_busy_percent"}) {
         if (auto v = readDouble(p)) { g.utilization = *v; break; }
     }
-    g.temperatureC = findIntelTemperature(cardPath);
+    g.temperatureC = findHwmonTemperature(cardPath);
     g.frequencyMHz = findIntelFrequency(cardPath);
     const auto vram = findIntelVram(cardPath);
     g.memoryUsedMiB = vram.first;
@@ -244,8 +248,11 @@ GpuMetric GpuCollector::collectIntelCard(const QString &cardPath, const QString 
     if (!std::isfinite(g.utilization) || !std::isfinite(g.powerW) || !std::isfinite(g.frequencyMHz)) {
         const QString top = commandPath("intel_gpu_top");
         if (!top.isEmpty() && g.state.toLower() != "suspended" && g.driver.toLower() != "xe") {
+            // intel_gpu_top streams JSON lines every -s milliseconds until it
+            // is killed; there is no sample-count flag, so rely on the
+            // runCommand timeout to cut it off.
             const QString dev = "/dev/dri/" + cardName;
-            const QStringList args = {"-J", "-s", "300", "-n", "2", "-d", "drm:" + dev, "-o", "-"};
+            const QStringList args = {"-J", "-s", "300", "-d", "drm:" + dev, "-o", "-"};
             int code = -1;
             const QByteArray raw = runCommand(top, args, 1300, &code);
             Q_UNUSED(code);
@@ -286,7 +293,7 @@ QVector<GpuMetric> GpuCollector::collectIntel() {
     return out;
 }
 
-double GpuCollector::findIntelTemperature(const QString &cardPath) {
+double GpuCollector::findHwmonTemperature(const QString &cardPath) {
     QDir hw(cardPath + "/device/hwmon");
     double best = lmNaN();
     for (const auto &h : hw.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
@@ -326,4 +333,247 @@ QPair<double,double> GpuCollector::findIntelVram(const QString &cardPath) {
     for (const auto &p : usedPaths) if (auto v = readDouble(p)) { used = *v / 1048576.0; break; }
     for (const auto &p : totalPaths) if (auto v = readDouble(p)) { total = *v / 1048576.0; break; }
     return {used, total};
+}
+
+QPair<double,double> GpuCollector::findAmdVram(const QString &cardPath) {
+    double used = lmNaN(), total = lmNaN();
+    if (auto v = readDouble(cardPath + "/device/mem_info_vram_used")) { used = *v / 1048576.0; }
+    if (auto v = readDouble(cardPath + "/device/mem_info_vram_total")) { total = *v / 1048576.0; }
+    return {used, total};
+}
+
+// --- AMD (amdgpu) ---
+
+GpuMetric GpuCollector::collectAmdCard(const QString &cardPath, const QString &cardName) {
+    GpuMetric g;
+    g.id = "amd:" + cardName;
+    g.vendor = "AMD";
+    g.name = "AMD GPU (" + cardName + ")";
+    // amdgpu exposes a human-readable product name on newer kernels.
+    const QString product = readText(cardPath + "/device/product_name").trimmed();
+    if (!product.isEmpty()) { g.name = "AMD " + product; }
+    g.driver = QFileInfo(cardPath + "/device/driver").symLinkTarget().section('/', -1);
+    if (g.driver.isEmpty()) { g.driver = "amdgpu"; }
+    g.state = readText(cardPath + "/device/power/runtime_status");
+    if (g.state.isEmpty()) { g.state = "active"; }
+    if (g.state.compare("suspended", Qt::CaseInsensitive) == 0) { g.utilization = 0.0; }
+
+    // gpu_busy_percent is the standard amdgpu utilization report (0-100).
+    for (const QString &p : {cardPath + "/device/gpu_busy_percent", cardPath + "/gpu_busy_percent"}) {
+        if (auto v = readDouble(p)) { g.utilization = *v; break; }
+    }
+    g.temperatureC = findHwmonTemperature(cardPath);
+
+    // hwmon: power1_average/power1_input in microwatts, freq1_input for the
+    // gfx clock. amdgpu reports the clock in Hz; guard the magnitude in case
+    // another driver exposes kHz or MHz directly.
+    QDir hw(cardPath + "/device/hwmon");
+    for (const auto &h : hw.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        QDir d(hw.filePath(h));
+        for (const QString &pf : {QStringLiteral("power1_average"), QStringLiteral("power1_input")}) {
+            if (auto v = readDouble(d.filePath(pf))) { g.powerW = *v / 1.0e6; break; }
+        }
+        if (auto v = readDouble(d.filePath(QStringLiteral("freq1_input")))) {
+            double mhz = *v;
+            if (mhz > 1.0e6) { mhz /= 1.0e6; }
+            else if (mhz > 1000.0) { mhz /= 1000.0; }
+            g.frequencyMHz = mhz;
+        }
+        if (std::isfinite(g.powerW) && std::isfinite(g.frequencyMHz)) { break; }
+    }
+
+    const auto vram = findAmdVram(cardPath);
+    g.memoryUsedMiB = vram.first;
+    g.memoryTotalMiB = vram.second;
+    return g;
+}
+
+QVector<GpuMetric> GpuCollector::collectAmd() {
+    QVector<GpuMetric> out;
+    QDir drm("/sys/class/drm");
+    const QRegularExpression cardRe("^card[0-9]+$");
+    const auto entries = drm.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const auto &name : entries) {
+        if (!cardRe.match(name).hasMatch()) continue;
+        const QString card = drm.filePath(name);
+        // AMD Radeon/Radeon Pro use PCI vendor 0x1002 (ATI/AMD/Advanced Micro Devices).
+        if (readText(card + "/device/vendor").toLower() != "0x1002") continue;
+        out.push_back(collectAmdCard(card, name));
+    }
+    return out;
+}
+
+// --- Huawei Ascend NPU ---
+
+QStringList GpuCollector::huaweiPciDevices() const {
+    QStringList out;
+    QDir d(QStringLiteral("/sys/bus/pci/devices"));
+    const auto entries = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const auto &e : entries) {
+        const QString base = d.filePath(e);
+        if (readText(base + QStringLiteral("/vendor")).toLower() != QStringLiteral("0x19e5")) { continue; }
+        // Ascend NPUs enumerate as processing accelerators (0x0b40); keep the
+        // display classes too so hybrid cards are not missed.
+        const QString cls = readText(base + QStringLiteral("/class")).toLower();
+        if (!cls.startsWith(QStringLiteral("0x0b40")) && !cls.startsWith(QStringLiteral("0x0300"))
+            && !cls.startsWith(QStringLiteral("0x0302"))) { continue; }
+        out.push_back(e);
+    }
+    return out;
+}
+
+GpuMetric GpuCollector::huaweiPlaceholder(const QString &bdf) {
+    GpuMetric g;
+    g.id = QStringLiteral("npu:") + bdf.toLower();
+    g.vendor = QStringLiteral("Huawei");
+    g.name = QStringLiteral("Huawei NPU");
+    g.driver = QStringLiteral("davinci");
+    QString state = readText(QStringLiteral("/sys/bus/pci/devices/") + bdf + QStringLiteral("/power/runtime_status"));
+    if (state.isEmpty()) { state = QStringLiteral("unknown"); }
+    g.state = state;
+    if (state.compare(QStringLiteral("suspended"), Qt::CaseInsensitive) == 0) { g.utilization = 0.0; }
+    return g;
+}
+
+QVector<GpuMetric> GpuCollector::collectHuawei() {
+    QVector<GpuMetric> out;
+    const QStringList pci = huaweiPciDevices();
+    if (pci.isEmpty()) { return out; }
+
+    const auto placeholders = [&]() {
+        for (const auto &bdf : pci) { out.push_back(huaweiPlaceholder(bdf)); }
+    };
+
+    const QString smi = commandPath(QStringLiteral("npu-smi"));
+    if (smi.isEmpty()) {
+        // Hardware present but the management tool is missing: keep the device
+        // visible (metrics unknown) instead of dropping it from the GUI.
+        placeholders();
+        return out;
+    }
+    int code = -1;
+    const QByteArray raw = runCommand(smi, {QStringLiteral("info")}, 5000, &code);
+    const auto devs = parseNpuSmiSummary(raw);
+    if (code != 0 || devs.isEmpty()) {
+        placeholders();
+        return out;
+    }
+
+    QSet<QString> covered;
+    for (const auto &d : devs) {
+        GpuMetric g;
+        g.vendor = QStringLiteral("Huawei");
+        g.driver = QStringLiteral("davinci");
+        g.state = QStringLiteral("active");
+        g.name = d.name.isEmpty() ? QStringLiteral("Huawei NPU")
+                                  : QStringLiteral("Huawei NPU (") + d.name + QStringLiteral(")");
+        g.utilization = d.utilization;
+        g.temperatureC = d.temperatureC;
+        g.powerW = d.powerW;
+        g.memoryUsedMiB = d.memoryUsedMiB;
+        g.memoryTotalMiB = d.memoryTotalMiB;
+        const QString bus = d.busId.toLower();
+        if (!bus.isEmpty()) {
+            g.id = QStringLiteral("npu:") + bus;
+            covered.insert(bus);
+            const QString drv = QFileInfo(QStringLiteral("/sys/bus/pci/devices/") + bus
+                + QStringLiteral("/driver")).symLinkTarget().section('/', -1);
+            if (!drv.isEmpty()) { g.driver = drv; }
+        } else {
+            g.id = QStringLiteral("npu:") + QString::number(static_cast<int>(out.size()));
+        }
+        out.push_back(g);
+    }
+    // A known PCI device not covered by npu-smi output keeps a placeholder row
+    // so its ID stays stable in the GUI.
+    for (const auto &bdf : pci) {
+        if (!covered.contains(bdf.toLower())) { out.push_back(huaweiPlaceholder(bdf)); }
+    }
+    return out;
+}
+
+QVector<GpuCollector::NpuSmiDevice> GpuCollector::parseNpuSmiSummary(const QByteArray &raw) {
+    QVector<NpuSmiDevice> out;
+    // Chip rows are recognized by a BDF cell; they carry AICore utilization and
+    // memory and follow their device row (name/power/temperature).
+    static const QRegularExpression bdfRe(QStringLiteral("^([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}\\.[0-9a-fA-F])$"));
+
+    NpuSmiDevice pending;
+    bool pendingValid = false;
+    auto flush = [&]() {
+        if (pendingValid) { out.push_back(pending); }
+        pending = NpuSmiDevice{};
+        pendingValid = false;
+    };
+
+    const auto lines = QString::fromUtf8(raw).split('\n');
+    for (const auto &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (!trimmed.startsWith('|')) { continue; }
+        const auto segs = trimmed.split('|');
+        QStringList cells;
+        for (int i = 1; i < segs.size(); ++i) { cells.append(segs.at(i).trimmed()); }
+        if (cells.isEmpty() || cells.at(0).isEmpty() || !cells.at(0).at(0).isDigit()) { continue; }
+
+        int bdfCell = -1;
+        for (int i = 0; i < cells.size(); ++i) {
+            if (bdfRe.match(cells.at(i)).hasMatch()) { bdfCell = i; break; }
+        }
+        if (!pendingValid) {
+            pendingValid = true; // tolerate tables whose device row is missing
+        }
+        if (bdfCell < 0) {
+            // Device row: first cell holds the NPU index and the product name.
+            const auto nameToks = cells.at(0).split(' ', Qt::SkipEmptyParts);
+            QString name;
+            for (int k = 1; k < static_cast<int>(nameToks.size()); ++k) {
+                const auto tok = nameToks.at(k);
+                bool onlyDigits = true;
+                for (const QChar &c : tok) { if (!c.isDigit()) { onlyDigits = false; break; } }
+                if (!onlyDigits) { name = tok; break; }
+            }
+            if (!name.isEmpty()) { pending.name = name; }
+            // Power (may be fractional) and temperature share a later cell,
+            // followed by other "X / Y" counters that must be skipped.
+            for (int i = 1; i < static_cast<int>(cells.size()); ++i) {
+                const auto toks = cells.at(i).split(' ', Qt::SkipEmptyParts);
+                int slash = -1;
+                for (int k = 0; k < static_cast<int>(toks.size()); ++k) {
+                    if (toks.at(k) == QStringLiteral("/")) { slash = k; break; }
+                }
+                const int start = (slash >= 0) ? slash + 2 : 0;
+                for (int k = start; k < static_cast<int>(toks.size()); ++k) {
+                    bool ok = false;
+                    const double v = toks.at(k).toDouble(&ok);
+                    if (!ok) { continue; }
+                    if (!std::isfinite(pending.powerW)) { pending.powerW = v; continue; }
+                    if (!std::isfinite(pending.temperatureC) && v > -100.0 && v < 150.0) {
+                        pending.temperatureC = v;
+                    }
+                }
+                if (std::isfinite(pending.powerW) && std::isfinite(pending.temperatureC)) { break; }
+            }
+        } else {
+            if (pending.busId.isEmpty()) { pending.busId = cells.at(bdfCell).toLower(); }
+            for (int i = bdfCell + 1; i < static_cast<int>(cells.size()); ++i) {
+                const auto toks = cells.at(i).split(' ', Qt::SkipEmptyParts);
+                int slash = -1;
+                for (int k = 0; k < static_cast<int>(toks.size()); ++k) {
+                    if (toks.at(k) == QStringLiteral("/")) { slash = k; break; }
+                }
+                if (slash <= 0 || slash + 1 >= static_cast<int>(toks.size())) { continue; }
+                // "AICore%  used / total MB": the token before the pair is the
+                // AICore utilization when present.
+                pending.memoryUsedMiB = parseNumber(toks.at(slash - 1)) / 1.048576;
+                pending.memoryTotalMiB = parseNumber(toks.at(slash + 1)) / 1.048576;
+                if (slash >= 2) { pending.utilization = parseNumber(toks.at(0)); }
+                break;
+            }
+            if (std::isfinite(pending.memoryTotalMiB)) {
+                flush(); // later chip rows belong to the next device row
+            }
+        }
+    }
+    flush();
+    return out;
 }

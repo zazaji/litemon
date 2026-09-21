@@ -1,0 +1,9 @@
+X-Python-Version: >= 3.6
+X-Comment: Use the source format for automatic version bumping.
+
+Format: 3.0 (quilt)
+Source: litemon
+Files:
+ * litemon_2.0.0.orig.tar.gz
+ * litemon_2.0.0-1.debian.tar.xz
+ * litemon_2.0.0-1.dsc

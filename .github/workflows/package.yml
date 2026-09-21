@@ -1,0 +1,84 @@
+name: Package Build
+
+on:
+  push:
+    tags: ['v*']
+    paths-ignore: ['debian/**', 'packaging/rpm/**']
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential debhelper cmake ninja-build \
+            qt6-base-dev libqt6charts-dev pkg-config \
+            libsystemd-dev dpkg-dev
+      - name: Build .deb
+        run: |
+          dpkg-buildpackage -us -uc -b -a${{ matrix.arch }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: |
+            ../litemon_*_${{ matrix.arch }}.deb
+            ../litemon-collector_*_${{ matrix.arch }}.deb
+
+  build-rpm:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+      - name: Build in container
+        run: |
+          docker run --privileged --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            fedora:latest bash -c '
+              dnf install -y gcc-c++ cmake ninja-build pkg-config \
+                qt6-qtbase-devel qt6-qttools-devel rpm-build \
+                rpm-sign git
+              cd /workspace
+              git config --global user.email "builder@example.com"
+              git config --global user.name "Builder"
+              tar czf litemon-2.0.0.tar.gz --exclude=.git --exclude=build *
+              rpmbuild -ba packaging/rpm/litemon.spec
+            '
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.arch }}
+          path: |
+            **/*.rpm
+
+  release:
+    needs: [build-deb, build-rpm]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            */*.deb
+            */*.rpm
+          generate_release_notes: true

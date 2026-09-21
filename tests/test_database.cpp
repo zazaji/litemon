@@ -140,9 +140,8 @@ int main(int argc, char **argv) {
         if (!latestSys || latestSys->cpuCores.size() != 2) return 49;
         if (std::abs(latestSys->cpuCores[0] - 50.0) > 0.051 || std::abs(latestSys->cpuCores[1] - 60.0) > 0.051) return 50;
     }
-    // No-signal GPU rows (primary metrics all NaN, e.g. an Intel iGPU with
-    // no readable sensors, or a fully empty sample) are neither stored nor
-    // reported, while the useful part of the sample still is.
+    // A GPU with only frequency (e.g. Intel iGPU with no hwmon sensors) IS
+    // considered signal-bearing — frequency alone is meaningful data.
     {
         SystemMetric m;
         m.timestamp = now - 101;
@@ -159,7 +158,7 @@ int main(int argc, char **argv) {
         QSqlQuery v(verify);
         v.prepare("SELECT COUNT(*) FROM gpu_raw WHERE id=:id");
         v.bindValue(":id", "intel:card9");
-        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 0) return 63;
+        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 1) return 63;
         v.prepare("SELECT COUNT(*) FROM system_raw WHERE ts=:ts");
         v.bindValue(":ts", now - 102);
         if (!v.exec() || !v.next() || v.value(0).toLongLong() != 0) return 64;
@@ -168,8 +167,25 @@ int main(int argc, char **argv) {
         if (!v.exec() || !v.next() || v.value(0).toLongLong() != 1) return 65;
         verify.close();
         QSqlDatabase::removeDatabase("test-verify-nosignal");
-        if (db.gpuIds(true).contains("intel:card9")) return 66;
-        for (const auto &lg : db.latestGpus()) { if (lg.id == "intel:card9") return 67; }
+        if (!db.gpuIds(true).contains("intel:card9")) return 66;
+        bool foundIntel = false;
+        for (const auto &lg : db.latestGpus()) { if (lg.id == "intel:card9") foundIntel = true; }
+        if (!foundIntel) return 67;
+        // Fully empty sample (no metrics, no battery, no GPUs) is still skipped.
+        SystemMetric m2;
+        m2.timestamp = now - 103;
+        if (!db.insert(m2, &error)) return 68;
+        {
+            QSqlDatabase v2 = QSqlDatabase::addDatabase("QSQLITE", "test-verify-empty");
+            v2.setDatabaseName(tmp.filePath("metrics.sqlite"));
+            if (!v2.open()) return 69;
+            QSqlQuery q2(v2);
+            q2.prepare("SELECT COUNT(*) FROM system_raw WHERE ts=:ts");
+            q2.bindValue(":ts", now - 103);
+            if (!q2.exec() || !q2.next() || q2.value(0).toLongLong() != 0) return 70;
+            v2.close();
+            QSqlDatabase::removeDatabase("test-verify-empty");
+        }
     }
     std::puts("Database PASS");
     return 0;

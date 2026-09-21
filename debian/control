@@ -1,0 +1,45 @@
+Source: litemon
+Section: utils
+Priority: optional
+Maintainer: zazaji <zazaji@sina.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+ ninja-build,
+ qt6-base-dev,
+ libqt6charts-dev,
+ pkg-config,
+ debhelper (= 13.1.2)
+Standards-Version: 4.7.0
+Homepage: https://github.com/litemon/litemon
+Vcs-Git: https://github.com/litemon/litemon
+Vcs-Branch: main
+
+Package: litemon
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ systemd
+Description: Lightweight local historical system monitor
+ LiteMon is a local-first Qt 6 monitor for Linux desktops.
+ It records CPU, memory, storage, network, battery, Intel GPU
+ and NVIDIA GPU history into a bounded SQLite database,
+ with compact charts and a sidebar-driven UI.
+ .
+ Features:
+  * CPU, memory, disk, network, battery, GPU history
+  * Intel GPU (sysfs frequency) and NVIDIA GPU (NVML)
+  * Per-core CPU charts, envelope bands for long ranges
+  * Auto-pruning of empty samples and no-signal GPUs
+  * 60-second minimum sampling, 5-minute aggregation
+
+Package: litemon-collector
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ systemd
+Description: LiteMon background metrics collector
+ Background daemon that samples system metrics and writes them
+ to the LiteMon SQLite database. Runs as a systemd user service.

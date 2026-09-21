@@ -77,6 +77,10 @@ bool MetricsDatabase::execSchema(QString *error) {
         ts INTEGER NOT NULL, core INTEGER NOT NULL, util INTEGER,
         PRIMARY KEY(ts,core)
     )";
+    const QString diskCols = R"(
+        ts INTEGER NOT NULL, mount TEXT NOT NULL, total INTEGER, used INTEGER,
+        PRIMARY KEY(ts,mount)
+    )";
     QSqlQuery q(db_);
     const QStringList stmts = {
         "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -86,10 +90,14 @@ bool MetricsDatabase::execSchema(QString *error) {
         "CREATE TABLE IF NOT EXISTS gpu_5m (" + gpuCols + ")",
         "CREATE TABLE IF NOT EXISTS cpu_cores_raw (" + cpuCoreCols + ")",
         "CREATE TABLE IF NOT EXISTS cpu_cores_5m (" + cpuCoreCols + ")",
+        "CREATE TABLE IF NOT EXISTS disks_raw (" + diskCols + ")",
+        "CREATE TABLE IF NOT EXISTS disks_5m (" + diskCols + ")",
         "CREATE INDEX IF NOT EXISTS idx_gpu_raw_id_ts ON gpu_raw(id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_gpu_5m_id_ts ON gpu_5m(id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_cpu_cores_raw_core_ts ON cpu_cores_raw(core,ts)",
-        "CREATE INDEX IF NOT EXISTS idx_cpu_cores_5m_core_ts ON cpu_cores_5m(core,ts)"
+        "CREATE INDEX IF NOT EXISTS idx_cpu_cores_5m_core_ts ON cpu_cores_5m(core,ts)",
+        "CREATE INDEX IF NOT EXISTS idx_disks_raw_mount_ts ON disks_raw(mount,ts)",
+        "CREATE INDEX IF NOT EXISTS idx_disks_5m_mount_ts ON disks_5m(mount,ts)"
     };
     for (const auto &s : stmts) if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
     return true;
@@ -109,7 +117,18 @@ static double sqlScaled(const QVariant &v, double scale) { return v.isNull() ? l
 // they are neither stored nor shown.
 static bool gpuHasSignal(const GpuMetric &g) {
     return std::isfinite(g.utilization) || std::isfinite(g.temperatureC)
-        || std::isfinite(g.powerW) || std::isfinite(g.memoryUsedMiB);
+        || std::isfinite(g.powerW) || std::isfinite(g.memoryUsedMiB)
+        || std::isfinite(g.frequencyMHz);
+}
+
+// Mount points that should never appear as user-facing disk entries. Shared
+// by diskMountPoints() and latestSystem() so both agree on the filter.
+static bool isUserFacingMount(const QString &m) {
+    static const QStringList skipPrefixes = {"/sys", "/var/lib/waydroid", "/boot/efi"};
+    static const QStringList skipExact = {"/root", "/var/tmp"};
+    for (const auto &p : skipPrefixes) { if (m.startsWith(p)) return false; }
+    for (const auto &e : skipExact) { if (m == e) return false; }
+    return true;
 }
 
 bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
@@ -124,11 +143,11 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
         const double vals[] = {m.cpuUsage, m.cpuTemperatureC, m.load1,
             m.memoryUsedMiB, m.memoryTotalMiB, m.swapUsedMiB, m.swapTotalMiB,
             m.networkRxMiBs, m.networkTxMiBs, m.diskReadMiBs, m.diskWriteMiBs,
-            m.diskUsedGiB, m.diskTotalGiB,
             m.batteryPercent, m.batteryPowerW, m.batteryHealthPercent};
         for (double v : vals) { if (std::isfinite(v)) return false; }
         if (!m.batteryStatus.isEmpty()) return false;
         if (!gpus.isEmpty()) return false;
+        if (!m.disks.isEmpty()) return false;
         for (double v : m.cpuCores) { if (std::isfinite(v)) return false; }
         return true;
     };
@@ -141,9 +160,10 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
     bindScaledOrNull(q,":cpu",m.cpuUsage,10.0); bindScaledOrNull(q,":ct",m.cpuTemperatureC,10.0); bindScaledOrNull(q,":load",m.load1,100.0);
     bindScaledOrNull(q,":mu",m.memoryUsedMiB,1.0); bindScaledOrNull(q,":mt",m.memoryTotalMiB,1.0); bindScaledOrNull(q,":su",m.swapUsedMiB,1.0); bindScaledOrNull(q,":st",m.swapTotalMiB,1.0);
     bindScaledOrNull(q,":nrx",m.networkRxMiBs,1000.0); bindScaledOrNull(q,":ntx",m.networkTxMiBs,1000.0); bindScaledOrNull(q,":dr",m.diskReadMiBs,1000.0); bindScaledOrNull(q,":dw",m.diskWriteMiBs,1000.0);
-    bindScaledOrNull(q,":du",m.diskUsedGiB,100.0); bindScaledOrNull(q,":dt",m.diskTotalGiB,100.0); bindScaledOrNull(q,":bp",m.batteryPercent,10.0); bindScaledOrNull(q,":bw",m.batteryPowerW,100.0); bindScaledOrNull(q,":bh",m.batteryHealthPercent,10.0);
-    // A missing battery (desktop) would otherwise repeat the same empty
-    // string every sample; NULL stores nothing.
+    // Store root disk (first disk) in system_raw for backward compatibility
+    const double rootUsed = m.disks.isEmpty() ? lmNaN() : m.disks[0].usedGiB;
+    const double rootTotal = m.disks.isEmpty() ? lmNaN() : m.disks[0].totalGiB;
+    bindScaledOrNull(q,":du",rootUsed,100.0); bindScaledOrNull(q,":dt",rootTotal,100.0); bindScaledOrNull(q,":bp",m.batteryPercent,10.0); bindScaledOrNull(q,":bw",m.batteryPowerW,100.0); bindScaledOrNull(q,":bh",m.batteryHealthPercent,10.0);
     if (m.batteryStatus.isEmpty()) q.bindValue(":bs", QVariant());
     else q.bindValue(":bs", m.batteryStatus);
     if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
@@ -162,6 +182,17 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
         bindScaledOrNull(q, ":u", m.cpuCores[core], 10.0);
         if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
     }
+
+    // Write per-disk data
+    q.prepare("INSERT OR REPLACE INTO disks_raw VALUES(:ts,:mount,:total,:used)");
+    for (const auto &d : m.disks) {
+        q.bindValue(":ts", m.timestamp);
+        q.bindValue(":mount", d.mountPoint);
+        bindScaledOrNull(q, ":total", d.totalGiB, 100.0);
+        bindScaledOrNull(q, ":used", d.usedGiB, 100.0);
+        if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
+    }
+
     return db_.commit();
 }
 
@@ -185,6 +216,10 @@ bool MetricsDatabase::maintain(qint64 now, const RetentionPolicy &policy, QStrin
       INSERT OR REPLACE INTO cpu_cores_5m
       SELECT (ts/300)*300,core,CAST(ROUND(AVG(util)) AS INTEGER)
       FROM cpu_cores_raw WHERE ts < %1 GROUP BY (ts/300),core)").arg(openBucket);
+    const QString aggDisks5 = QString(R"(
+      INSERT OR REPLACE INTO disks_5m
+      SELECT (ts/300)*300,mount,CAST(ROUND(AVG(total)) AS INTEGER),CAST(ROUND(AVG(used)) AS INTEGER)
+      FROM disks_raw WHERE ts < %1 GROUP BY (ts/300),mount)").arg(openBucket);
     // Day rollover rule: keep at least `detailDays` calendar days of fine
     // data (today plus the preceding days), at minimum 6 days. Older detail
     // rows were folded into the archive above, so deleting them only clears
@@ -193,23 +228,25 @@ bool MetricsDatabase::maintain(qint64 now, const RetentionPolicy &policy, QStrin
     const qint64 dayStart = QDateTime(QDate::currentDate(), QTime(0, 0)).toSecsSinceEpoch();
     const qint64 detailCutoff = dayStart - static_cast<qint64>(detailDays - 1) * 86400;
     const qint64 archiveCutoff = now - static_cast<qint64>(std::max(30, policy.archiveDays)) * 86400;
-    // Purge GPU rows that carry no signal (all primary metrics NULL):
-    // e.g. an Intel iGPU with only a frequency reading, or a nvidia-smi
-    // placeholder that never produced real data.  These waste space and
-    // clutter the GUI device selector.
+    // Purge GPU rows that carry no signal at all (every metric NULL): e.g. a
+    // nvidia-smi placeholder that never produced real data. Frequency-only
+    // rows are kept — that is all a sysfs-only Intel iGPU can report, and the
+    // GPU page must stay selectable for it (matches gpuHasSignal above).
     const QString purgeNoSignalGpu =
-        "DELETE FROM gpu_raw WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_used IS NULL";
+        "DELETE FROM gpu_raw WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_used IS NULL AND freq IS NULL";
     const QString purgeNoSignalGpu5m =
-        "DELETE FROM gpu_5m WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_used IS NULL";
+        "DELETE FROM gpu_5m WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_used IS NULL AND freq IS NULL";
     const QStringList stmts = {
-        aggSys5, aggGpu5, aggCpu5,
+        aggSys5, aggGpu5, aggCpu5, aggDisks5,
         purgeNoSignalGpu, purgeNoSignalGpu5m,
         QString("DELETE FROM system_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM gpu_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM cpu_cores_raw WHERE ts < %1").arg(detailCutoff),
+        QString("DELETE FROM disks_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM system_5m WHERE ts < %1").arg(archiveCutoff),
         QString("DELETE FROM gpu_5m WHERE ts < %1").arg(archiveCutoff),
-        QString("DELETE FROM cpu_cores_5m WHERE ts < %1").arg(archiveCutoff)
+        QString("DELETE FROM cpu_cores_5m WHERE ts < %1").arg(archiveCutoff),
+        QString("DELETE FROM disks_5m WHERE ts < %1").arg(archiveCutoff)
     };
     for (const auto &s : stmts) if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
     // Give space back to the filesystem at most once a day. A failed VACUUM
@@ -402,7 +439,28 @@ std::optional<SystemMetric> MetricsDatabase::latestSystem() const {
     m.timestamp=q.value(0).toLongLong(); m.cpuUsage=sqlScaled(q.value(1),10.0); m.cpuTemperatureC=sqlScaled(q.value(2),10.0); m.load1=sqlScaled(q.value(3),100.0);
     m.memoryUsedMiB=sqlScaled(q.value(4),1.0); m.memoryTotalMiB=sqlScaled(q.value(5),1.0); m.swapUsedMiB=sqlScaled(q.value(6),1.0); m.swapTotalMiB=sqlScaled(q.value(7),1.0);
     m.networkRxMiBs=sqlScaled(q.value(8),1000.0); m.networkTxMiBs=sqlScaled(q.value(9),1000.0); m.diskReadMiBs=sqlScaled(q.value(10),1000.0); m.diskWriteMiBs=sqlScaled(q.value(11),1000.0);
-    m.diskUsedGiB=sqlScaled(q.value(12),100.0); m.diskTotalGiB=sqlScaled(q.value(13),100.0); m.batteryPercent=sqlScaled(q.value(14),10.0); m.batteryPowerW=sqlScaled(q.value(15),100.0); m.batteryHealthPercent=sqlScaled(q.value(16),10.0); m.batteryStatus=q.value(17).toString();
+    m.batteryPercent=sqlScaled(q.value(14),10.0); m.batteryPowerW=sqlScaled(q.value(15),100.0); m.batteryHealthPercent=sqlScaled(q.value(16),10.0); m.batteryStatus=q.value(17).toString();
+    // Load every mounted volume recorded at the latest disks_raw timestamp.
+    // The GUI overview cards and the Disk page selector are both driven from
+    // this list, so a LIMIT 1 here would leave only "/" visible in the UI.
+    {
+        QSqlQuery dq(db_);
+        if (dq.exec("SELECT mount,total,used FROM disks_raw WHERE ts=(SELECT MAX(ts) FROM disks_raw) ORDER BY mount")) {
+            while (dq.next()) {
+                const QString mount = dq.value(0).toString();
+                if (!isUserFacingMount(mount)) continue;
+                DiskInfo d;
+                d.mountPoint = mount;
+                d.totalGiB = sqlScaled(dq.value(1), 100.0);
+                d.usedGiB = sqlScaled(dq.value(2), 100.0);
+                m.disks.push_back(d);
+            }
+        }
+        // Root filesystem first so it leads the overview cards.
+        std::stable_sort(m.disks.begin(), m.disks.end(), [](const DiskInfo &a, const DiskInfo &b) {
+            return (a.mountPoint == "/") != (b.mountPoint == "/") && a.mountPoint == "/";
+        });
+    }
     {
         QSqlQuery cores(db_);
         if (cores.exec("SELECT core,util FROM cpu_cores_raw WHERE ts=(SELECT MAX(ts) FROM cpu_cores_raw) ORDER BY core")) {
@@ -488,10 +546,10 @@ QVector<SystemMetric> MetricsDatabase::systemHistory(qint64 from, qint64 to, int
     const qint64 bucket = std::max<qint64>(1, span / std::max(100,targetPoints));
     const QString table = sourceTable(span);
     QSqlQuery q(db_);
-    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b,AVG(cpu_usage),AVG(cpu_temp),AVG(load1),AVG(mem_used),AVG(mem_total),AVG(swap_used),AVG(swap_total),AVG(net_rx),AVG(net_tx),AVG(disk_read),AVG(disk_write),AVG(disk_used),AVG(disk_total),AVG(battery_percent),AVG(battery_power),AVG(battery_health) FROM %1 WHERE ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
+    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b,AVG(cpu_usage),AVG(cpu_temp),AVG(load1),AVG(mem_used),AVG(mem_total),AVG(swap_used),AVG(swap_total),AVG(net_rx),AVG(net_tx),AVG(disk_read),AVG(disk_write),AVG(battery_percent),AVG(battery_power),AVG(battery_health) FROM %1 WHERE ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
     q.bindValue(":bucket",bucket); q.bindValue(":from",from); q.bindValue(":to",to);
     if (!q.exec()) return out;
-    while(q.next()) { SystemMetric m; m.timestamp=q.value(0).toLongLong(); m.cpuUsage=sqlScaled(q.value(1),10.0); m.cpuTemperatureC=sqlScaled(q.value(2),10.0); m.load1=sqlScaled(q.value(3),100.0); m.memoryUsedMiB=sqlScaled(q.value(4),1.0); m.memoryTotalMiB=sqlScaled(q.value(5),1.0); m.swapUsedMiB=sqlScaled(q.value(6),1.0); m.swapTotalMiB=sqlScaled(q.value(7),1.0); m.networkRxMiBs=sqlScaled(q.value(8),1000.0); m.networkTxMiBs=sqlScaled(q.value(9),1000.0); m.diskReadMiBs=sqlScaled(q.value(10),1000.0); m.diskWriteMiBs=sqlScaled(q.value(11),1000.0); m.diskUsedGiB=sqlScaled(q.value(12),100.0); m.diskTotalGiB=sqlScaled(q.value(13),100.0); m.batteryPercent=sqlScaled(q.value(14),10.0); m.batteryPowerW=sqlScaled(q.value(15),100.0); m.batteryHealthPercent=sqlScaled(q.value(16),10.0); out.push_back(m); }
+    while(q.next()) { SystemMetric m; m.timestamp=q.value(0).toLongLong(); m.cpuUsage=sqlScaled(q.value(1),10.0); m.cpuTemperatureC=sqlScaled(q.value(2),10.0); m.load1=sqlScaled(q.value(3),100.0); m.memoryUsedMiB=sqlScaled(q.value(4),1.0); m.memoryTotalMiB=sqlScaled(q.value(5),1.0); m.swapUsedMiB=sqlScaled(q.value(6),1.0); m.swapTotalMiB=sqlScaled(q.value(7),1.0); m.networkRxMiBs=sqlScaled(q.value(8),1000.0); m.networkTxMiBs=sqlScaled(q.value(9),1000.0); m.diskReadMiBs=sqlScaled(q.value(10),1000.0); m.diskWriteMiBs=sqlScaled(q.value(11),1000.0); m.batteryPercent=sqlScaled(q.value(12),10.0); m.batteryPowerW=sqlScaled(q.value(13),100.0); m.batteryHealthPercent=sqlScaled(q.value(14),10.0); out.push_back(m); }
     return out;
 }
 
@@ -507,9 +565,11 @@ QVector<SystemMetric> MetricsDatabase::gpuHistory(const QString &gpuId, qint64 f
 QStringList MetricsDatabase::gpuIds(bool signalOnly) const {
     QStringList ids; QSqlQuery q(db_);
     const QString where = signalOnly
-        ? " WHERE util IS NOT NULL OR temp IS NOT NULL OR power IS NOT NULL OR mem_used IS NOT NULL"
+        ? " WHERE util IS NOT NULL OR temp IS NOT NULL OR power IS NOT NULL OR mem_used IS NOT NULL OR freq IS NOT NULL"
         : QString();
-    if(q.exec(QString("SELECT DISTINCT id FROM gpu_raw%1 UNION SELECT DISTINCT id FROM gpu_5m%1 ORDER BY id").arg(where))) while(q.next()) ids<<q.value(0).toString(); return ids; }
+    if(q.exec(QString("SELECT DISTINCT id FROM gpu_raw%1 UNION SELECT DISTINCT id FROM gpu_5m%1 ORDER BY id").arg(where)))
+        while(q.next()) ids<<q.value(0).toString();
+    return ids; }
 QString MetricsDatabase::gpuName(const QString &id) const {
     QSqlQuery q(db_);
     const char *tables[] = {"gpu_raw", "gpu_5m"};
@@ -522,4 +582,40 @@ QString MetricsDatabase::gpuName(const QString &id) const {
         }
     }
     return id;
+}
+
+QStringList MetricsDatabase::diskMountPoints() const {
+    QStringList mounts;
+    QSqlQuery q(db_);
+    if (q.exec("SELECT DISTINCT mount FROM disks_raw UNION SELECT DISTINCT mount FROM disks_5m ORDER BY mount")) {
+        while (q.next()) {
+            const QString m = q.value(0).toString();
+            if (isUserFacingMount(m)) mounts << m;
+        }
+    }
+    return mounts;
+}
+
+QVector<DiskInfo> MetricsDatabase::diskHistory(const QString &mountPoint, qint64 from, qint64 to, int targetPoints) const {
+    QVector<DiskInfo> out;
+    const qint64 span = std::max<qint64>(1, to - from);
+    const qint64 bucket = std::max<qint64>(1, span / std::max(100, targetPoints));
+    const auto c = AppConfig::load();
+    const QString table = span <= static_cast<qint64>(std::max(6, c.detailRetentionDays)) * 86400 ? "disks_raw" : "disks_5m";
+    QSqlQuery q(db_);
+    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b, AVG(total), AVG(used) FROM %1 WHERE mount=:mount AND ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
+    q.bindValue(":bucket", bucket);
+    q.bindValue(":mount", mountPoint);
+    q.bindValue(":from", from);
+    q.bindValue(":to", to);
+    if (!q.exec()) return out;
+    while (q.next()) {
+        DiskInfo d;
+        d.timestamp = q.value(0).toLongLong();
+        d.mountPoint = mountPoint;
+        d.totalGiB = sqlScaled(q.value(1), 100.0);
+        d.usedGiB = sqlScaled(q.value(2), 100.0);
+        out.push_back(d);
+    }
+    return out;
 }

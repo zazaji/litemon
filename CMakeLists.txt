@@ -63,6 +63,7 @@ install(TARGETS litemon litemon-collector RUNTIME DESTINATION ${CMAKE_INSTALL_BI
 install(FILES packaging/io.github.litemon.LiteMon.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES packaging/io.github.litemon.LiteMon.metainfo.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
 install(FILES packaging/io.github.litemon.LiteMon.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+install(FILES packaging/litemon-collector.service DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/system)
 
 include(CTest)
 if(BUILD_TESTING AND LITEMON_BUILD_TESTS)

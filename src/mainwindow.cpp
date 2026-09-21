@@ -111,7 +111,7 @@ void MainWindow::setupUi(){
     auto*sl=new QVBoxLayout(side);sl->setContentsMargins(14,12,14,12);sl->setSpacing(6);
     auto*brand=titleLabel(QStringLiteral("LiteMon"));sl->addWidget(brand);
     auto*nav=new QListWidget;
-    nav->addItems({tr("Overview"),tr("CPU"),tr("Memory"),tr("Network / Disk"),tr("GPU"),tr("Battery")});
+    nav->addItems({tr("Overview"),tr("CPU"),tr("Memory"),tr("Network"),tr("Disk"),tr("GPU"),tr("Battery")});
     nav->setCurrentRow(0);
     nav->setFrameShape(QFrame::NoFrame);
     nav->setStyleSheet(QStringLiteral(
@@ -119,8 +119,9 @@ void MainWindow::setupUi(){
         "QListWidget::item { padding: 9px 12px; border-radius: 8px; margin: 1px 2px; }"
         "QListWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }"
         "QListWidget::item:hover:!selected { background: palette(base); }"));
-    sl->addWidget(nav,1);
-    sl->addStretch(1);
+    auto*navScroll=new QScrollArea;navScroll->setWidget(nav);navScroll->setWidgetResizable(true);navScroll->setFrameShape(QFrame::NoFrame);navScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    navScroll->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; border: none; }"));
+    sl->addWidget(navScroll,1);
     auto*historyLabel=sectionLabel(tr("History"));sl->addWidget(historyLabel);
     auto*navBar=new QHBoxLayout;navBar->setSpacing(4);
     prevBtn_=new QPushButton(QStringLiteral("\u25C0"));prevBtn_->setToolTip(tr("Previous period"));
@@ -143,8 +144,12 @@ void MainWindow::setupUi(){
     auto*overview=new QWidget;auto*ov=new QVBoxLayout(overview);ov->setContentsMargins(20,10,20,12);ov->setSpacing(8);
     auto*grid=new QGridLayout;grid->setSpacing(8);grid->setContentsMargins(0,2,0,0);
     grid->setColumnStretch(0,1);grid->setColumnStretch(1,1);grid->setColumnStretch(2,1);
-    cpuCard_=makeCard(tr("CPU"),grid,0,0);memCard_=makeCard(tr("Memory"),grid,0,1);diskCard_=makeCard(tr("Root disk"),grid,0,2);netCard_=makeCard(tr("Network"),grid,1,0);batteryCard_=makeCard(tr("Battery"),grid,1,1);
+    cpuCard_=makeCard(tr("CPU"),grid,0,0);memCard_=makeCard(tr("Memory"),grid,0,1);netCard_=makeCard(tr("Network"),grid,0,2);batteryCard_=makeCard(tr("Battery"),grid,1,0);
     ov->addLayout(grid);
+    diskCardsContainer_=new QWidget;diskCardsLayout_=new QGridLayout(diskCardsContainer_);
+    diskCardsLayout_->setSpacing(8);diskCardsLayout_->setContentsMargins(0,0,0,0);
+    diskCardsLayout_->setColumnStretch(0,1);diskCardsLayout_->setColumnStretch(1,1);diskCardsLayout_->setColumnStretch(2,1);
+    ov->addWidget(diskCardsContainer_);
     gpuCardsContainer_=new QWidget;gpuCardsLayout_=new QGridLayout(gpuCardsContainer_);
     gpuCardsLayout_->setSpacing(8);gpuCardsLayout_->setContentsMargins(0,0,0,0);
     gpuCardsLayout_->setColumnStretch(0,1);gpuCardsLayout_->setColumnStretch(1,1);gpuCardsLayout_->setColumnStretch(2,1);
@@ -160,13 +165,16 @@ void MainWindow::setupUi(){
     cpuCoresLayout_->setColumnStretch(0,1);cpuCoresLayout_->setColumnStretch(1,1);cpuCoresLayout_->setColumnStretch(2,1);cpuCoresLayout_->setColumnStretch(3,1);
     cpuCoresScroll_->setWidget(coresHost);cpuLay->addWidget(cpuCoresScroll_,1);stack_->addWidget(cpuPage);
     auto*mem=makeHistoryPage(&mem_,&swap_);mem_->setTitle("Memory used","GiB");swap_->setTitle("Swap used","GiB");stack_->addWidget(mem);
-    auto*io=makeHistoryPage(&net_,&diskIo_);net_->setTitle("Network throughput","MiB/s");diskIo_->setTitle("Disk throughput","MiB/s");auto*ioLayout=static_cast<QVBoxLayout*>(io->layout());diskSpace_=new ChartWidget;diskSpace_->setTitle("Root filesystem occupancy","GiB");diskSpace_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);ioLayout->addWidget(diskSpace_,1);stack_->addWidget(io);
+    auto*netPage=makeHistoryPage(&net_,&diskIo_);net_->setTitle("Network throughput","MiB/s");diskIo_->setTitle("Disk I/O throughput","MiB/s");stack_->addWidget(netPage);
+    auto*diskPage=new QWidget;auto*diskLay=new QVBoxLayout(diskPage);diskLay->setContentsMargins(20,10,20,12);diskLay->setSpacing(8);
+    auto*diskBar=new QHBoxLayout;diskBar->addWidget(new QLabel(tr("Device:")));diskSelector_=new QComboBox;diskSelector_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);diskBar->addWidget(diskSelector_,1);diskLay->addLayout(diskBar);
+    diskUsage_=new ChartWidget;diskUsage_->setTitle("Filesystem usage","GiB");diskUsage_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);diskLay->addWidget(diskUsage_,1);stack_->addWidget(diskPage);
     auto*gpuPage=makeHistoryPage(&gpuUsage_,&gpuAux_);auto*gplay=static_cast<QVBoxLayout*>(gpuPage->layout());
     auto*gpuBar=new QHBoxLayout;gpuBar->addWidget(new QLabel(tr("Device:")));gpuSelector_=new QComboBox;gpuSelector_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);gpuBar->addWidget(gpuSelector_,1);gplay->insertLayout(0,gpuBar);
     gpuUsage_->setTitle("GPU utilization","%");gpuUsage_->setFixedYRange(0,100);gpuAux_->setTitle("Temperature / Power","°C / W");gpuMemory_=new ChartWidget;gpuMemory_->setTitle("GPU memory (discrete GPUs)","GiB");gpuMemory_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);gplay->addWidget(gpuMemory_,1);stack_->addWidget(gpuPage);
     auto*bat=makeHistoryPage(&battery_,&batteryPower_);battery_->setTitle("Battery level / health","%");battery_->setFixedYRange(0,110);batteryPower_->setTitle("Battery charge / discharge power","W");stack_->addWidget(bat);
 
-    connect(nav,&QListWidget::currentRowChanged,stack_,&QStackedWidget::setCurrentIndex);connect(nav,&QListWidget::currentRowChanged,this,[this](int){refreshHistory();});connect(range_,&QComboBox::currentIndexChanged,this,[this]{ timeOffset_=0; refreshHistory(); });connect(gpuSelector_,&QComboBox::currentIndexChanged,this,&MainWindow::gpuSelectionChanged);
+    connect(nav,&QListWidget::currentRowChanged,stack_,&QStackedWidget::setCurrentIndex);connect(nav,&QListWidget::currentRowChanged,this,[this](int){refreshHistory();});connect(range_,&QComboBox::currentIndexChanged,this,[this]{ timeOffset_=0; refreshHistory(); });connect(gpuSelector_,&QComboBox::currentIndexChanged,this,&MainWindow::gpuSelectionChanged);connect(diskSelector_,&QComboBox::currentIndexChanged,this,&MainWindow::diskSelectionChanged);
     connect(prevBtn_,&QPushButton::clicked,this,[this]{ timeOffset_+=selectedSpanSeconds(); refreshHistory(); });
     connect(nextBtn_,&QPushButton::clicked,this,[this]{ timeOffset_=qMax(qint64(0),timeOffset_-selectedSpanSeconds()); refreshHistory(); });
 }
@@ -192,14 +200,25 @@ void MainWindow::refreshLatest(){
     if (!x.cpuCores.isEmpty()) { cpuDetail += " · " + QString::number(x.cpuCores.size()) + " cores"; }
     cpuCard_.detail->setText(cpuDetail);
     const double memPct=(std::isfinite(x.memoryUsedMiB)&&x.memoryTotalMiB>0)?x.memoryUsedMiB/x.memoryTotalMiB*100:lmNaN();memCard_.value->setText(fmtPercent(memPct));memCard_.detail->setText(humanBytesMiB(x.memoryUsedMiB)+" / "+humanBytesMiB(x.memoryTotalMiB));
-    const double diskPct=(std::isfinite(x.diskUsedGiB)&&x.diskTotalGiB>0)?x.diskUsedGiB/x.diskTotalGiB*100:lmNaN();diskCard_.value->setText(fmtPercent(diskPct));diskCard_.detail->setText((std::isfinite(x.diskUsedGiB)?QString::number(x.diskUsedGiB,'f',1):"—")+" / "+(std::isfinite(x.diskTotalGiB)?QString::number(x.diskTotalGiB,'f',1):"—")+" GiB");
     netCard_.value->setText("↓ "+humanRate(x.networkRxMiBs));netCard_.detail->setText("↑ "+humanRate(x.networkTxMiBs));
     batteryCard_.value->setText(fmtPercent(x.batteryPercent));batteryCard_.detail->setText((x.batteryStatus.isEmpty()?"No battery":x.batteryStatus)+" · "+fmtPower(x.batteryPowerW)+" · health "+fmtPercent(x.batteryHealthPercent));
+
+    // Dynamic disk cards on overview
+    while(auto*item=diskCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}diskCards_.clear();
+    int dc=0;for(const auto&d:x.disks){QString diskTitle=d.mountPoint;auto card=makeCard(diskTitle,diskCardsLayout_,dc/3,dc%3);const double pct=(std::isfinite(d.usedGiB)&&d.totalGiB>0)?d.usedGiB/d.totalGiB*100:lmNaN();card.value->setText(fmtPercent(pct));card.detail->setText((std::isfinite(d.usedGiB)?QString::number(d.usedGiB,'f',1):"—")+" / "+(std::isfinite(d.totalGiB)?QString::number(d.totalGiB,'f',1):"—")+" GiB");diskCards_[d.mountPoint]=card;++dc;}
+    if(x.disks.isEmpty()){auto*l=new QLabel("No disk data yet.");l->setWordWrap(true);diskCardsLayout_->addWidget(l,0,0);}
+
+    // Update disk selector for Disk page
+    const QString curDisk=diskSelector_?diskSelector_->currentData().toString():QString();
+    QStringList diskMounts;for(const auto&d:x.disks)diskMounts<<d.mountPoint;
+    bool diskSame=(diskSelector_->count()==diskMounts.size());
+    if(diskSame){for(int i=0;i<diskMounts.size();++i){if(diskSelector_->itemData(i).toString()!=diskMounts[i]){diskSame=false;break;}}}
+    if(!diskSame){diskSelector_->blockSignals(true);diskSelector_->clear();for(const auto&mp:diskMounts)diskSelector_->addItem(mp,mp);int idx=diskSelector_->findData(curDisk);if(idx<0&&!diskMounts.isEmpty())idx=0;diskSelector_->setCurrentIndex(idx);diskSelector_->blockSignals(false);diskSelectionChanged();}
 
     const auto gpus=db_.latestGpus();
     while(auto*item=gpuCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}gpuCards_.clear();
     int c=0;for(const auto&g:gpus){QString gpuTitle=g.vendor+" · "+g.name;if(gpuTitle.length()>24)gpuTitle=gpuTitle.left(21)+"…";auto card=makeCard(gpuTitle,gpuCardsLayout_,c/3,c%3);card.value->setText(g.state=="suspended"?"Suspended":fmtPercent(g.utilization));QStringList d;d<<fmtTemp(g.temperatureC)<<fmtPower(g.powerW);if(std::isfinite(g.frequencyMHz))d<<QString::number(g.frequencyMHz,'f',0)+" MHz";if(std::isfinite(g.memoryTotalMiB)&&g.memoryTotalMiB>0)d<<humanBytesMiB(g.memoryUsedMiB)+" / "+humanBytesMiB(g.memoryTotalMiB);else if(g.vendor=="Intel")d<<"shared memory";card.detail->setText(d.join(" · "));gpuCards_[g.id]=card;++c;}
-    if(gpus.isEmpty()){auto*l=new QLabel("No Intel/NVIDIA GPU metrics yet. Intel: install intel-gpu-tools; NVIDIA: proprietary driver provides nvidia-smi.");l->setWordWrap(true);gpuCardsLayout_->addWidget(l,0,0);}
+    if(gpus.isEmpty()){auto*l=new QLabel("No GPU/NPU metrics yet. AMD: amdgpu driver; Intel: install intel-gpu-tools; NVIDIA: proprietary driver provides nvidia-smi; Huawei Ascend: install npu-smi.");l->setWordWrap(true);gpuCardsLayout_->addWidget(l,0,0);}
 
     const QString current=gpuSelector_->currentData().toString();
     const auto ids=db_.gpuIds(true); // hide signal-less devices (empty charts)
@@ -234,7 +253,7 @@ void MainWindow::refreshHistory(){
     const auto h=db_.systemHistory(from,to,AppConfig::load().historyTargetPoints);
     cpuUsage_->setSeries({{"Usage",points(h,[](const auto&m){return m.cpuUsage;})}});cpuTemp_->setSeries({{"Temperature",points(h,[](const auto&m){return m.cpuTemperatureC;})}});
     mem_->setSeries({{"Used",points(h,[](const auto&m){return m.memoryUsedMiB/1024.0;})},{"Total",points(h,[](const auto&m){return m.memoryTotalMiB/1024.0;})}});swap_->setSeries({{"Swap",points(h,[](const auto&m){return m.swapUsedMiB/1024.0;})}});
-    net_->setSeries({{"Download",points(h,[](const auto&m){return m.networkRxMiBs;})},{"Upload",points(h,[](const auto&m){return m.networkTxMiBs;})}});diskIo_->setSeries({{"Read",points(h,[](const auto&m){return m.diskReadMiBs;})},{"Write",points(h,[](const auto&m){return m.diskWriteMiBs;})}});diskSpace_->setSeries({{"Used",points(h,[](const auto&m){return m.diskUsedGiB;})},{"Total",points(h,[](const auto&m){return m.diskTotalGiB;})}});
+    net_->setSeries({{"Download",points(h,[](const auto&m){return m.networkRxMiBs;})},{"Upload",points(h,[](const auto&m){return m.networkTxMiBs;})}});diskIo_->setSeries({{"Read",points(h,[](const auto&m){return m.diskReadMiBs;})},{"Write",points(h,[](const auto&m){return m.diskWriteMiBs;})}});
     battery_->setSeries({{"Level",points(h,[](const auto&m){return m.batteryPercent;})},{"Health",points(h,[](const auto&m){return m.batteryHealthPercent;})}});batteryPower_->setSeries({{"Power",points(h,[](const auto&m){return m.batteryPowerW;})}});
     // Hide per-core charts for large time ranges (>7 days)
     const bool showCores = span <= 604800;
@@ -257,6 +276,7 @@ void MainWindow::refreshHistory(){
     }
     periodLabel_->setText(text);
     gpuSelectionChanged();
+    diskSelectionChanged();
 }
 
 void MainWindow::refreshCpuCoreCharts(qint64 from, qint64 to){
@@ -297,6 +317,16 @@ void MainWindow::refreshCpuCoreCharts(qint64 from, qint64 to){
 
 void MainWindow::gpuSelectionChanged(){const QString id=gpuSelector_?gpuSelector_->currentData().toString():QString();if(id.isEmpty()){gpuUsage_->setSeries({});gpuAux_->setSeries({});gpuMemory_->setSeries({});return;}const qint64 to=QDateTime::currentSecsSinceEpoch(),from=to-selectedSpanSeconds();const auto h=db_.gpuHistory(id,from,to,AppConfig::load().historyTargetPoints);gpuUsage_->setSeries({{"Usage",points(h,[](const auto&m){return m.gpus.isEmpty()?lmNaN():m.gpus[0].utilization;})}});gpuAux_->setSeries({{"Temperature",points(h,[](const auto&m){return m.gpus.isEmpty()?lmNaN():m.gpus[0].temperatureC;})},{"Power",points(h,[](const auto&m){return m.gpus.isEmpty()?lmNaN():m.gpus[0].powerW;})}});gpuMemory_->setSeries({{"Used",points(h,[](const auto&m){return m.gpus.isEmpty()?lmNaN():m.gpus[0].memoryUsedMiB/1024.0;})},{"Total",points(h,[](const auto&m){return m.gpus.isEmpty()?lmNaN():m.gpus[0].memoryTotalMiB/1024.0;})}});}
 
+void MainWindow::diskSelectionChanged(){
+    const QString mount=diskSelector_?diskSelector_->currentData().toString():QString();
+    if(mount.isEmpty()){diskUsage_->setSeries({});return;}
+    const qint64 to=QDateTime::currentSecsSinceEpoch(),from=to-selectedSpanSeconds();
+    const auto h=db_.diskHistory(mount,from,to,AppConfig::load().historyTargetPoints);
+    QVector<ChartWidget::Point> usedPts,totalPts; usedPts.reserve(h.size()); totalPts.reserve(h.size());
+    for(const auto&d:h){usedPts.push_back({d.timestamp,d.usedGiB});totalPts.push_back({d.timestamp,d.totalGiB});}
+    diskUsage_->setSeries({{"Used",usedPts},{"Total",totalPts}});
+}
+
 
 void MainWindow::showSettings() {
     SettingsDialog d(this);
@@ -326,12 +356,12 @@ void MainWindow::exportCurrentCsv() {
     const qint64 from = to - selectedSpanSeconds();
     const auto h = db_.systemHistory(from, to, 10000);
     QTextStream out(&f);
-    out << "timestamp,cpu_usage,cpu_temp,load1,memory_used_mib,memory_total_mib,network_rx_mibs,network_tx_mibs,disk_read_mibs,disk_write_mibs,disk_used_gib,disk_total_gib,battery_percent,battery_power_w,battery_health_percent\n";
+    out << "timestamp,cpu_usage,cpu_temp,load1,memory_used_mib,memory_total_mib,network_rx_mibs,network_tx_mibs,disk_read_mibs,disk_write_mibs,battery_percent,battery_power_w,battery_health_percent\n";
     for (const auto &m : h) {
         auto n=[](double v){ return std::isfinite(v) ? QString::number(v, 'g', 12) : QString(); };
         out << m.timestamp << ',' << n(m.cpuUsage) << ',' << n(m.cpuTemperatureC) << ',' << n(m.load1) << ','
             << n(m.memoryUsedMiB) << ',' << n(m.memoryTotalMiB) << ',' << n(m.networkRxMiBs) << ',' << n(m.networkTxMiBs) << ','
-            << n(m.diskReadMiBs) << ',' << n(m.diskWriteMiBs) << ',' << n(m.diskUsedGiB) << ',' << n(m.diskTotalGiB) << ','
+            << n(m.diskReadMiBs) << ',' << n(m.diskWriteMiBs) << ','
             << n(m.batteryPercent) << ',' << n(m.batteryPowerW) << ',' << n(m.batteryHealthPercent) << '\n';
     }
 }

@@ -35,7 +35,6 @@ static QJsonObject toJson(const SystemMetric &m) {
         {"swap_used_mib", jsonNumber(m.swapUsedMiB)}, {"swap_total_mib", jsonNumber(m.swapTotalMiB)},
         {"network_rx_mibs", jsonNumber(m.networkRxMiBs)}, {"network_tx_mibs", jsonNumber(m.networkTxMiBs)},
         {"disk_read_mibs", jsonNumber(m.diskReadMiBs)}, {"disk_write_mibs", jsonNumber(m.diskWriteMiBs)},
-        {"disk_used_gib", jsonNumber(m.diskUsedGiB)}, {"disk_total_gib", jsonNumber(m.diskTotalGiB)},
         {"battery_percent", jsonNumber(m.batteryPercent)}, {"battery_power_w", jsonNumber(m.batteryPowerW)},
         {"battery_health", jsonNumber(m.batteryHealthPercent)}, {"battery_status", m.batteryStatus}
     };
@@ -49,6 +48,15 @@ static QJsonObject toJson(const SystemMetric &m) {
         });
     }
     o["gpus"] = gpus;
+    QJsonArray disks;
+    for (const auto &d : m.disks) {
+        disks.append(QJsonObject {
+            {"mount_point", d.mountPoint}, {"total_gib", jsonNumber(d.totalGiB)},
+            {"used_gib", jsonNumber(d.usedGiB)}, {"read_mibs", jsonNumber(d.readMiBs)},
+            {"write_mibs", jsonNumber(d.writeMiBs)}
+        });
+    }
+    o["disks"] = disks;
     QJsonArray cores;
     for (double v : m.cpuCores) { cores.append(jsonNumber(v)); }
     o["cpu_cores"] = cores;

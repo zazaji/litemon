@@ -42,6 +42,24 @@ Thumbs.db
 litemon
 *.AppImage
 
+# Debian packaging build artifacts
+debian/*.deb
+debian/*.changes
+debian/*.dsc
+debian/*.buildinfo
+debian/*.tar.gz
+debian/debhelper*
+debian/tmp/
+debian/litemon/
+debian/litemon-collector/
+debian/substvars
+
+# RPM build artifacts
+packaging/rpm/*.rpm
+packaging/rpm/*.tar.gz
+packaging/rpm/rpmbuild/
+build/rpm/
+
 # Test artifacts
 Testing/
 *.gcda
