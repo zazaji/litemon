@@ -18,9 +18,16 @@
 
 namespace {
 // Cached ABI constants for per-process CPU share (clock ticks per second,
-// page size in MiB).
+// page size in MiB). sysconf is not declared by mingw's unistd.h, but these
+// values are only consumed by the /proc-based sampling paths, which read
+// nothing on Windows.
+#if defined(_SC_CLK_TCK) && defined(_SC_PAGESIZE)
 const double kClkTicks = [] { const long v = sysconf(_SC_CLK_TCK); return v > 0 ? static_cast<double>(v) : 100.0; }();
 const double kPageMiB = [] { const long v = sysconf(_SC_PAGESIZE); return v > 0 ? static_cast<double>(v) / 1048576.0 : 4.0 / 1024.0; }();
+#else
+const double kClkTicks = 100.0;
+const double kPageMiB = 4.0 / 1024.0;
+#endif
 constexpr int kTopN = 20;
 }
 

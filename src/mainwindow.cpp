@@ -659,8 +659,14 @@ QVector<ProcInfo> MainWindow::sampleProcesses() {
     proc.setFilter(QDir::Dirs | QDir::NoDotAndDotDot);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const double dt = lastProcSampleMs_ > 0 ? static_cast<double>(nowMs - lastProcSampleMs_) / 1000.0 : 0.0;
+    // mingw does not declare sysconf; the /proc scan yields nothing on Windows.
+#if defined(_SC_CLK_TCK) && defined(_SC_PAGESIZE)
     static const double clkTicks = [] { const long v = sysconf(_SC_CLK_TCK); return v > 0 ? static_cast<double>(v) : 100.0; }();
     static const double pageMiB = [] { const long v = sysconf(_SC_PAGESIZE); return v > 0 ? static_cast<double>(v) / 1048576.0 : 4.0 / 1024.0; }();
+#else
+    static const double clkTicks = 100.0;
+    static const double pageMiB = 4.0 / 1024.0;
+#endif
     QHash<qint64, quint64> cur;
     QVector<ProcInfo> out;
     out.reserve(proc.count());
