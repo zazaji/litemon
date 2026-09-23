@@ -1,11 +1,18 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 - 2026-09-24
 
 ### Added
+- hardware sensor monitoring: hwmon temperatures, battery state and fan speeds in the GUI
+- pressure stall information (PSI) for CPU, memory and I/O
+- process top-20 page with per-process CPU/memory/swap treemap
+- interactive chart crosshair with value readout
+- AMD GPU metrics (via sysfs) and Huawei Ascend NPU support (via npu-smi, unverified without hardware)
+- system tray icon with autostart option
 - per-core CPU monitoring: collector samples each core, storage keeps a `cpu_cores_raw`/`cpu_cores_5m` domain (schema v4, migrated automatically), and the CPU page shows one chart per core plus the aggregate chart
 - main-window status bar shows the database path and total size (MB, 1 decimal)
 - daily VACUUM reclaims space after retention pruning
+- cross-platform CI (Debian GCC/Clang, sanitizers) and deb/rpm packaging workflow
 
 ### Changed
 - storage schema v3: two tables per domain — fine `*_raw` detail (default last 7 calendar days, minimum 6) plus compressed `*_5m` 5-minute-average archive (default 365 days); legacy 1-minute/10-minute tables are folded into the archive on migration
