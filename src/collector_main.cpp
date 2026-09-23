@@ -27,6 +27,12 @@ static QJsonValue jsonNumber(double v) {
     return std::isfinite(v) ? QJsonValue(v) : QJsonValue(QJsonValue::Null);
 }
 
+static void procArrAppend(QJsonArray &arr, const ProcInfo &p) {
+    arr.append(QJsonObject {{"pid", static_cast<qlonglong>(p.pid)}, {"name", p.name}, {"state", p.state},
+        {"cpu_percent", jsonNumber(p.cpuPercent)}, {"rss_mib", jsonNumber(p.rssMiB)},
+        {"threads", static_cast<qlonglong>(p.threads)}});
+}
+
 static QJsonObject toJson(const SystemMetric &m) {
     QJsonObject o {
         {"timestamp", m.timestamp}, {"cpu_usage", jsonNumber(m.cpuUsage)},
@@ -36,7 +42,11 @@ static QJsonObject toJson(const SystemMetric &m) {
         {"network_rx_mibs", jsonNumber(m.networkRxMiBs)}, {"network_tx_mibs", jsonNumber(m.networkTxMiBs)},
         {"disk_read_mibs", jsonNumber(m.diskReadMiBs)}, {"disk_write_mibs", jsonNumber(m.diskWriteMiBs)},
         {"battery_percent", jsonNumber(m.batteryPercent)}, {"battery_power_w", jsonNumber(m.batteryPowerW)},
-        {"battery_health", jsonNumber(m.batteryHealthPercent)}, {"battery_status", m.batteryStatus}
+        {"battery_health", jsonNumber(m.batteryHealthPercent)}, {"battery_status", m.batteryStatus},
+        {"psi_cpu", jsonNumber(m.psiCpuSome)}, {"psi_mem", jsonNumber(m.psiMemSome)},
+        {"psi_io", jsonNumber(m.psiIoSome)},
+        {"battery_temp", jsonNumber(m.batteryTemperatureC)},
+        {"nvme_temp", jsonNumber(m.nvmeTemperatureC)}
     };
     QJsonArray gpus;
     for (const auto &g : m.gpus) {
@@ -60,6 +70,21 @@ static QJsonObject toJson(const SystemMetric &m) {
     QJsonArray cores;
     for (double v : m.cpuCores) { cores.append(jsonNumber(v)); }
     o["cpu_cores"] = cores;
+    QJsonArray sensorArr;
+    for (const auto &s : m.sensors) {
+        sensorArr.append(QJsonObject {{"chip", s.chip}, {"label", s.label}, {"temp_c", jsonNumber(s.tempC)}});
+    }
+    o["sensors"] = sensorArr;
+    QJsonArray fanArr;
+    for (const auto &f : m.fans) {
+        fanArr.append(QJsonObject {{"chip", f.chip}, {"label", f.label}, {"rpm", jsonNumber(f.rpm)}});
+    }
+    o["fans"] = fanArr;
+    QJsonArray topArr;
+    for (const auto &p : m.topProcs.mid(0, 5)) {
+        procArrAppend(topArr, p);
+    }
+    o["top"] = topArr;
     return o;
 }
 

@@ -29,6 +29,33 @@ struct DiskInfo {
     double writeMiBs = lmNaN();
 };
 
+// One hwmon temperature/fan reading. label falls back to the chip name when
+// the kernel exposes no per-channel label.
+struct SensorInfo {
+    QString chip;
+    QString label;
+    double tempC = lmNaN();
+};
+
+struct FanInfo {
+    QString chip;
+    QString label;
+    double rpm = lmNaN();
+};
+
+// One live process snapshot (GUI-side /proc sampling; not stored in history).
+struct ProcInfo {
+    qint64 pid = 0;
+    QString name;
+    QString state;
+    double cpuPercent = lmNaN();
+    double rssMiB = lmNaN();
+    // VmSwap from /proc/<pid>/status; NaN when the process has no VmSwap
+    // line (never swapped) or the read failed.
+    double swapMiB = lmNaN();
+    qint64 threads = 0;
+};
+
 struct SystemMetric {
     qint64 timestamp = 0;
     double cpuUsage = lmNaN();
@@ -49,7 +76,22 @@ struct SystemMetric {
     double batteryPercent = lmNaN();
     double batteryPowerW = lmNaN();
     double batteryHealthPercent = lmNaN();
+    double batteryTemperatureC = lmNaN();
     QString batteryStatus;
+    // Mean NVMe composite temperature across nvme hwmon channels; NaN when
+    // no nvme hwmon exists. Persisted so long-range temperature charts work.
+    double nvmeTemperatureC = lmNaN();
+    // Pressure Stall Information, "some" avg10 (0-100). NaN when the kernel
+    // has no /proc/pressure (CONFIG_PSI disabled or pre-4.20).
+    double psiCpuSome = lmNaN();
+    double psiMemSome = lmNaN();
+    double psiIoSome = lmNaN();
+    QVector<SensorInfo> sensors;
+    QVector<FanInfo> fans;
+    // Top-20 process ranking by composite score (CPU%+2)×(10MB+RSS MB),
+    // computed by the collector and persisted (procs_raw/procs_5m domains);
+    // live GUI sampling is separate.
+    QVector<ProcInfo> topProcs;
     QVector<GpuMetric> gpus;
 };
 

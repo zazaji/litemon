@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
         GpuMetric g; g.id="intel:card0"; g.vendor="Intel"; g.name="Intel GPU"; g.utilization=30+i%10; m.gpus={g};
         if (!db.insert(m, &error)) return 3;
     }
-    if (db.schemaVersion() != 4) return 4;
+    if (db.schemaVersion() != 6) return 4;
     if (!db.integrityCheck(&error)) return 9;
     if (!db.maintain(now, &error)) return 8;
     const auto latest = db.latestSystem();

@@ -15,8 +15,22 @@ struct AppConfig {
     int maintenanceIntervalSec = 60;
     int historyTargetPoints = 900;
     bool collectGpu = true;
+    // Tray icon digits: sensor keys "chip|label" from the live hwmon scan.
+    // Empty string = slot disabled; slot 2 alone without slot 1 is treated as
+    // slot 1 by the UI (order is normalized on load).
+    QString traySensor1;
+    QString traySensor2;
+    // Appearance: "system" | "light" | "dark" (palette switch, style kept).
+    QString theme = "system";
+    // Launch the GUI automatically at login (XDG autostart entry).
+    bool autostart = false;
 
     static AppConfig load();
     void save() const;
     static QString configPath();
+    // Create or remove ~/.config/autostart/io.github.litemon.LiteMon.desktop
+    // so the desktop session starts the GUI at login. Returns false with a
+    // message in *error when the entry cannot be written or removed.
+    static bool setAutostartEnabled(bool enable, QString *error);
+    static QString autostartFilePath();
 };

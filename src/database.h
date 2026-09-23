@@ -21,6 +21,8 @@ public:
     bool maintain(qint64 now, QString *error) { return maintain(now, RetentionPolicy{}, error); }
     std::optional<SystemMetric> latestSystem() const;
     QVector<GpuMetric> latestGpus() const;
+    // Latest top-20 rankings: {cpu-ranked, mem-ranked}.
+    QVector<ProcInfo> latestProcs() const;
     QVector<SystemMetric> systemHistory(qint64 from, qint64 to, int targetPoints = 900) const;
     QVector<BandPoint> systemHistoryBands(qint64 from, qint64 to, int numBands = 100) const;
     QVector<SystemMetric> gpuHistory(const QString &gpuId, qint64 from, qint64 to, int targetPoints = 900) const;
@@ -44,7 +46,9 @@ private:
     bool migrate(QString *error);
     bool migrateToV3(QString *error);
     bool migrateToV4(QString *error);
+    bool migrateToV5(QString *error);
     bool hasTable(const QString &name) const;
+    QStringList tableColumns(const QString &table) const;
     static void bindScaledOrNull(QSqlQuery &q, const QString &name, double value, double scale);
 
     QString path_;

@@ -1,8 +1,12 @@
 #include "appconfig.h"
 
+#include <QCoreApplication>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QSettings>
+#include <QTextStream>
 #include <algorithm>
 
 QString AppConfig::configPath() {
@@ -25,6 +29,11 @@ AppConfig AppConfig::load() {
     c.maintenanceIntervalSec = std::clamp(s.value("maintenance/interval_seconds", c.maintenanceIntervalSec).toInt(), 30, 3600);
     c.historyTargetPoints = std::clamp(s.value("ui/history_target_points", c.historyTargetPoints).toInt(), 200, 3000);
     c.collectGpu = s.value("sampling/collect_gpu", c.collectGpu).toBool();
+    c.traySensor1 = s.value("tray/sensor1").toString();
+    c.traySensor2 = s.value("tray/sensor2").toString();
+    const QString t = s.value("ui/theme").toString();
+    c.theme = (t == "light" || t == "dark") ? t : "system";
+    c.autostart = s.value("ui/autostart", c.autostart).toBool();
     return c;
 }
 
@@ -37,5 +46,47 @@ void AppConfig::save() const {
     s.setValue("retention/archive_days", archiveRetentionDays);
     s.setValue("maintenance/interval_seconds", maintenanceIntervalSec);
     s.setValue("ui/history_target_points", historyTargetPoints);
+    s.setValue("tray/sensor1", traySensor1);
+    s.setValue("tray/sensor2", traySensor2);
+    s.setValue("ui/theme", theme);
+    s.setValue("ui/autostart", autostart);
     s.sync();
+}
+
+QString AppConfig::autostartFilePath() {
+    const auto env = QProcessEnvironment::systemEnvironment();
+    QString base = env.value("XDG_CONFIG_HOME");
+    if (base.isEmpty()) base = QDir::homePath() + "/.config";
+    return base + "/autostart/io.github.litemon.LiteMon.desktop";
+}
+
+bool AppConfig::setAutostartEnabled(bool enable, QString *error) {
+    const QString path = autostartFilePath();
+    if (!enable) {
+        if (QFile::exists(path) && !QFile::remove(path)) {
+            if (error) *error = QObject::tr("Could not remove %1").arg(path);
+            return false;
+        }
+        return true;
+    }
+    // Exec points at the running binary so a relocated install stays valid.
+    const QString exec = QCoreApplication::applicationFilePath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (error) *error = QObject::tr("Could not write %1").arg(path);
+        return false;
+    }
+    QTextStream out(&f);
+    out << "[Desktop Entry]\n"
+        << "Type=Application\n"
+        << "Name=LiteMon\n"
+        << "Comment=LiteMon lightweight local metrics monitor\n"
+        << "Exec=" << exec << "\n"
+        << "Icon=io.github.litemon.LiteMon\n"
+        << "Terminal=false\n"
+        << "Categories=System;Monitor;\n"
+        << "X-GNOME-Autostart-enabled=true\n";
+    f.close();
+    return true;
 }

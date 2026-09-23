@@ -10,6 +10,20 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QElapsedTimer>
+#include <QRegularExpression>
+#include <algorithm>
+#include <cmath>
+#include <unistd.h>
+
+namespace {
+// Cached ABI constants for per-process CPU share (clock ticks per second,
+// page size in MiB).
+const double kClkTicks = [] { const long v = sysconf(_SC_CLK_TCK); return v > 0 ? static_cast<double>(v) : 100.0; }();
+const double kPageMiB = [] { const long v = sysconf(_SC_PAGESIZE); return v > 0 ? static_cast<double>(v) / 1048576.0 : 4.0 / 1024.0; }();
+constexpr int kTopN = 20;
+}
+
 using namespace LinuxUtils;
 
 SystemCollector::SystemCollector() {
@@ -152,6 +166,7 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
     QDir ps("/sys/class/power_supply");
     double energyNow = 0, energyFull = 0, energyDesign = 0, power = 0;
     double pctSum = 0; int pctCount = 0; bool any = false;
+    double tempSum = 0; int tempCount = 0;
     QStringList statuses;
     for (const auto &e : ps.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString base = ps.filePath(e);
@@ -176,6 +191,8 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
             const auto volt = readDouble(base + "/voltage_now");
             if (cur && volt) power += (*cur) * (*volt) / 1e12;
         }
+        // power_supply ABI: temp_input is tenths of a degree Celsius.
+        if (auto t = readDouble(base + "/temp_input")) { tempSum += *t / 10.0; ++tempCount; }
     }
     if (!any) return;
     if (energyFull > 0 && energyNow >= 0) m.batteryPercent = std::clamp(energyNow / energyFull * 100.0, 0.0, 100.0);
@@ -184,6 +201,7 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
     const bool charging = std::any_of(statuses.cbegin(), statuses.cend(), [](const QString &s){ return s.compare("Charging", Qt::CaseInsensitive) == 0; });
     const bool discharging = std::any_of(statuses.cbegin(), statuses.cend(), [](const QString &s){ return s.compare("Discharging", Qt::CaseInsensitive) == 0; });
     m.batteryPowerW = (discharging && !charging) ? -power : power;
+    if (tempCount > 0) m.batteryTemperatureC = tempSum / tempCount;
     m.batteryStatus = statuses.join(" + ");
 }
 
@@ -202,6 +220,10 @@ void SystemCollector::collectDisks(SystemMetric &m) const {
     // because the latter calls stat() on every mount point, which blocks on
     // unreachable network mounts (CIFS/NFS).
     const QStringList skipFs = {"tmpfs", "devtmpfs", "sysfs", "proc", "devpts", "cgroup", "cgroup2", "pstore", "securityfs", "debugfs", "tracefs", "fusectl", "configfs", "hugetlbfs", "mqueue", "binfmt_misc", "autofs", "rpc_pipefs", "nfsd", "overlay", "efivarfs"};
+    // Network filesystems block on statfs for as long as their server is
+    // unreachable (CIFS hard mounts: forever), so they never get a
+    // QStorageInfo. fuseblk is kept — that is how ntfs-3g local disks show up.
+    const QStringList networkFs = {"cifs", "smbfs", "smb2", "nfs", "nfs4", "ceph", "afs", "ncpfs", "sshfs", "fuse.sshfs", "fuse.gvfsd-fuse", "fuse.portal", "fuse.lxcfs", "9p", "virtiofs"};
     QHash<QString, DiskInfo> byDevice;
     QFile f("/proc/mounts");
     if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -213,6 +235,9 @@ void SystemCollector::collectDisks(SystemMetric &m) const {
             const QString mount = fields[1];
             const QString fsType = fields[2];
             if (skipFs.contains(fsType, Qt::CaseInsensitive)) continue;
+            if (networkFs.contains(fsType, Qt::CaseInsensitive)) continue;
+            if (fsType.startsWith("fuse.", Qt::CaseInsensitive) && fsType.compare("fuseblk", Qt::CaseInsensitive) != 0) continue;
+            if (mount.startsWith("//")) continue; // CIFS device naming: //server/share
             if (mount.startsWith("/boot/efi") || mount.startsWith("/sys/") || mount.startsWith("/var/lib/waydroid")) continue;
             // Use QStorageInfo only for the specific mount, not all volumes
             QStorageInfo vol(mount);
@@ -353,7 +378,79 @@ SystemMetric SystemCollector::collect(bool includeGpu) {
     collectLoad(m);
     collectTemperature(m);
     collectBattery(m);
+    collectPsi(m);
+    collectSensors(m);
+    collectProcesses(m);
     collectDisks(m);
     if (includeGpu) m.gpus = gpuCollector_.collect();
     return m;
+}
+
+void SystemCollector::collectPsi(SystemMetric &m) const {
+    const auto cpu = parsePsiContent(readText("/proc/pressure/cpu"));
+    const auto mem = parsePsiContent(readText("/proc/pressure/memory"));
+    const auto io = parsePsiContent(readText("/proc/pressure/io"));
+    if (std::isfinite(cpu.some)) m.psiCpuSome = cpu.some;
+    if (std::isfinite(mem.some)) m.psiMemSome = mem.some;
+    if (std::isfinite(io.some)) m.psiIoSome = io.some;
+}
+
+void SystemCollector::collectSensors(SystemMetric &m) const {
+    QVector<FanInfo> fans;
+    m.sensors = readHwmonSensors(&fans);
+    m.fans = fans;
+    // Named key temperature: mean across nvme hwmon channels, persisted as
+    // its own column so hard-drive temperature charts cover long ranges.
+    double sum = 0; int n = 0;
+    for (const auto &s : m.sensors) {
+        if (s.chip.compare("nvme", Qt::CaseInsensitive) == 0) { sum += s.tempC; ++n; }
+    }
+    if (n > 0) m.nvmeTemperatureC = sum / n;
+}
+
+void SystemCollector::collectProcesses(SystemMetric &m) const {
+    // Differential /proc scan: CPU share needs the previous sample's tick
+    // counts, exactly like the rate counters above.
+    QDir proc("/proc");
+    proc.setNameFilters({"[0-9]*"});
+    proc.setFilter(QDir::Dirs | QDir::NoDotAndDotDot);
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const double dt = lastProcSampleMs_ > 0 ? static_cast<double>(nowMs - lastProcSampleMs_) / 1000.0 : 0.0;
+    QHash<qint64, quint64> cur;
+    QVector<ProcInfo> procs;
+    procs.reserve(proc.count());
+    for (const auto &e : proc.entryList()) {
+        const auto s = parseProcStat(readText("/proc/" + e + "/stat"));
+        if (!s) continue; // process vanished between listing and read
+        cur[s->pid] = s->cpuTicks;
+        ProcInfo p;
+        p.pid = s->pid;
+        p.name = s->name;
+        p.state = s->state;
+        p.threads = s->threads;
+        p.rssMiB = static_cast<double>(s->rssPages) * kPageMiB;
+        if (dt > 0) {
+            const auto prev = lastProcTicks_.constFind(s->pid);
+            if (prev != lastProcTicks_.constEnd() && s->cpuTicks >= *prev) {
+                p.cpuPercent = static_cast<double>(s->cpuTicks - *prev) / kClkTicks / dt * 100.0;
+            }
+        }
+        procs.push_back(p);
+    }
+    lastProcTicks_ = std::move(cur);
+    lastProcSampleMs_ = nowMs;
+
+    // Top-20 by composite score (CPU%+2)×(10MB+RSS MB): memory-heavy users
+    // lead even at idle CPU. The first sample has no deltas, so scores
+    // collapse to RSS ranking there and stay visible from the first report.
+    QVector<ProcInfo> ranked = procs;
+    const auto score = [](const ProcInfo &p) {
+        const double cpu = std::isfinite(p.cpuPercent) ? p.cpuPercent : 0.0;
+        const double rss = std::isfinite(p.rssMiB) ? p.rssMiB : 0.0;
+        return (cpu + 2.0) * (10.0 + rss);
+    };
+    std::stable_sort(ranked.begin(), ranked.end(), [&score](const ProcInfo &a, const ProcInfo &b) {
+        return score(a) > score(b);
+    });
+    m.topProcs = ranked.mid(0, kTopN);
 }

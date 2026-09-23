@@ -53,6 +53,8 @@ target_link_libraries(litemon-collector PRIVATE litemon_core)
 add_executable(litemon
     src/gui_main.cpp
     src/chartwidget.h src/chartwidget.cpp
+    src/treemaplayout.h
+    src/treemapwidget.h src/treemapwidget.cpp
     src/settingsdialog.h src/settingsdialog.cpp
     src/mainwindow.h src/mainwindow.cpp
 )
@@ -82,6 +84,10 @@ if(BUILD_TESTING AND LITEMON_BUILD_TESTS)
     add_executable(test_collector tests/test_collector.cpp)
     target_link_libraries(test_collector PRIVATE litemon_core)
     add_test(NAME collector COMMAND test_collector)
+
+    add_executable(test_parsers tests/test_parsers.cpp)
+    target_link_libraries(test_parsers PRIVATE litemon_core)
+    add_test(NAME parsers COMMAND test_parsers)
 endif()
 
 set(CPACK_PACKAGE_NAME "litemon")

@@ -2,6 +2,7 @@
 #include <QDialog>
 
 class QCheckBox;
+class QComboBox;
 class QSpinBox;
 
 class SettingsDialog : public QDialog {
@@ -16,4 +17,8 @@ private:
     QSpinBox *detailDays_ = nullptr;
     QSpinBox *archiveDays_ = nullptr;
     QCheckBox *gpuEnabled_ = nullptr;
+    QComboBox *theme_ = nullptr;
+    QCheckBox *autostart_ = nullptr;
+    QComboBox *traySensor1_ = nullptr;
+    QComboBox *traySensor2_ = nullptr;
 };
