@@ -10,7 +10,7 @@ jobs:
     container: debian:trixie
     steps:
       - uses: actions/checkout@v4
-      - run: apt-get update && apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite dpkg-dev fakeroot
+      - run: apt-get update && apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite dpkg-dev fakeroot file
       - run: cmake --preset release
       - run: cmake --build --preset release -j2
       - run: ctest --test-dir build/release --output-on-failure
