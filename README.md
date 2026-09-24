@@ -188,16 +188,25 @@ sudo dnf makecache && sudo dnf install litemon
 **Direct download from GitHub Releases:**
 
 ```bash
-# Debian / Ubuntu
-wget https://github.com/litemon/litemon/releases/latest/download/litemon_*_amd64.deb
-wget https://github.com/litemon/litemon/releases/latest/download/litemon-collector_*_amd64.deb
-sudo dpkg -i litemon_*.deb litemon-collector_*.deb
+# Debian / Ubuntu (amd64, arm64)
+wget https://github.com/zazaji/litemon/releases/latest/download/litemon_2.1.0_amd64.deb
+sudo dpkg -i litemon_2.1.0_amd64.deb
 sudo apt-get install -f   # fix any missing dependencies
 
 # Fedora / Rocky / AlmaLinux / RHEL
 wget https://github.com/litemon/litemon/releases/latest/download/litemon-*.x86_64.rpm
 sudo dnf install litemon-*.x86_64.rpm
 ```
+
+> Note: the `packages.litemon.dev` repository host is operated separately from
+> GitHub Releases; until it is live, use the direct-download path above.
+
+**Windows / macOS (unofficial builds):**
+
+Cross-built on Linux, unsigned (no Apple developer certificate / code signing).
+The Windows bundle is a portable folder — unzip and run `litemon.exe`.
+The macOS app targets Apple Silicon (arm64) and is unsigned; on first launch,
+right-click the app and choose **Open** to bypass Gatekeeper.
 
 > Note: the `packages.litemon.dev` repository host is operated separately from
 > GitHub Releases; until it is live, use the direct-download path above.
