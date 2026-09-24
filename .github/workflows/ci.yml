@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dependencies
         run: |
           apt-get update
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: apt-get update && apt-get install -y clang cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite
       - run: CC=clang CXX=clang++ cmake --preset dev
       - run: cmake --build --preset dev -j2
@@ -44,7 +44,7 @@ jobs:
       matrix:
         preset: [asan, ubsan]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: apt-get update && apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite
       - run: cmake --preset ${{ matrix.preset }}
       - run: cmake --build --preset ${{ matrix.preset }} -j2
@@ -54,7 +54,7 @@ jobs:
     name: macOS / Qt6
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Qt6
         run: brew install qt@6
       - name: Configure
@@ -72,7 +72,7 @@ jobs:
     name: Windows / MSVC
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Qt6
         uses: jurplel/install-qt-action@v4
         with:
