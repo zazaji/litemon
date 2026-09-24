@@ -15,7 +15,7 @@ jobs:
       - run: cmake --build --preset release -j2
       - run: ctest --test-dir build/release --output-on-failure
       - run: cd build/release && cpack -G DEB && cpack -G TGZ
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             build/release/*.deb
