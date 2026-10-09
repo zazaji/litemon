@@ -13,7 +13,7 @@ jobs:
       - name: Dependencies
         run: |
           apt-get update
-          apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite python3 shellcheck
+          apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite python3 shellcheck file
       - name: Configure
         run: cmake --preset release
       - name: Build
@@ -68,22 +68,6 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  windows:
-    name: Windows / MSVC
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Qt6
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.8.2'
-          host: 'windows'
-          target: 'desktop'
-          arch: 'win64_msvc2022_64'
-          # qtsql ships inside qtbase; listing it here makes install-qt fail parsing
-      - name: Configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
-      - name: Build
-        run: cmake --build build --config Release -j2
-      - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+# Windows compile checks run on the home113 cross-compile host
+# (scripts/home113-build.sh, mingw-w64) — see release.yml / release.sh.
+

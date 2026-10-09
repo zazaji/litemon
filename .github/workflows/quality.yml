@@ -8,6 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # git diff --check HEAD^ needs the parent commit
       - name: Whitespace and repository hygiene
         run: |
           git diff --check HEAD^
@@ -24,4 +26,5 @@ jobs:
       - uses: actions/checkout@v4
       - run: apt-get update && apt-get install -y clang-tidy clang cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite
       - run: CC=clang CXX=clang++ cmake --preset dev
+      - run: cmake --build --preset dev -j2   # generate AUTOMOC's mocs_compilation.cpp before tidy
       - run: run-clang-tidy -p build/dev -quiet
