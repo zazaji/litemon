@@ -23,7 +23,7 @@ jobs:
       - name: Script checks
         run: shellcheck scripts/*.sh
       - name: Package
-        run: cpack --config build/release/CPackConfig.cmake
+        run: cpack --config build/release/CPackConfig.cmake -G "DEB;TGZ"
 
   clang:
     name: Debian 13 / Clang
