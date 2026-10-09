@@ -365,17 +365,90 @@ void ChartWidget::paintEvent(QPaintEvent *) {
                    QDateTime::fromSecsSinceEpoch(ts).toString(lay.timeFmt));
     }
 
+    // Segments with more than three consecutive missing samples count as
+    // outages: the line is broken there and the whole span is shaded red
+    // instead of being bridged by the line.
+    struct GapBand { double x0, x1; };
+    QList<GapBand> gapBands;
+    QList<QPainterPath> paths;
     int si = 0;
     for (const auto &s : series_) {
+        const int n = static_cast<int>(s.points.size());
+        // Nominal sample cadence: median of the deltas between consecutive
+        // samples, so a minority of long gaps does not skew the estimate.
+        QVector<qint64> deltas;
+        for (int i = 1; i < n; ++i) {
+            const qint64 d = s.points.at(i).ts - s.points.at(i - 1).ts;
+            if (d > 0) { deltas.append(d); }
+        }
+        qint64 step = 0;
+        if (!deltas.isEmpty()) {
+            std::sort(deltas.begin(), deltas.end());
+            step = qMax<qint64>(1, deltas.at(deltas.size() / 2));
+        }
+
         QPainterPath path;
-        bool started = false;
-        for (const auto &pt : s.points) {
+        int prev = -1;
+        for (int i = 0; i < n; ++i) {
+            const auto &pt = s.points.at(i);
             if (!std::isfinite(pt.value)) { continue; }
             const double x = plot.left() + static_cast<double>(pt.ts - lay.minTs) * plot.width()
                 / static_cast<double>(lay.maxTs - lay.minTs);
             const double y = plot.bottom() - (pt.value - minY) * plot.height() / (maxY - minY);
-            if (!started) { path.moveTo(x, y); started = true; } else { path.lineTo(x, y); }
+            if (prev < 0) {
+                path.moveTo(x, y);
+            } else {
+                int missing = 0;
+                for (int k = prev + 1; k < i; ++k) {
+                    if (!std::isfinite(s.points.at(k).value)) { ++missing; }
+                }
+                if (step > 0) {
+                    const double dt = static_cast<double>(pt.ts - s.points.at(prev).ts);
+                    const int spanned = static_cast<int>(std::lround(dt / static_cast<double>(step)));
+                    missing = qMax(missing, spanned - 1);
+                }
+                const double xPrev = plot.left() + static_cast<double>(s.points.at(prev).ts - lay.minTs)
+                    * plot.width() / static_cast<double>(lay.maxTs - lay.minTs);
+                if (missing > 3) {
+                    const double half = qMax(0.0, x - xPrev) / (missing + 1) / 2.0;
+                    gapBands.append({xPrev + half, x - half});
+                    path.moveTo(x, y);
+                } else {
+                    path.lineTo(x, y);
+                }
+            }
+            prev = i;
         }
+        paths.append(path);
+        ++si;
+    }
+
+    // Merge overlapping gap bands and paint them behind the curves.
+    if (!gapBands.isEmpty()) {
+        std::sort(gapBands.begin(), gapBands.end(),
+                  [](const GapBand &a, const GapBand &b) { return a.x0 < b.x0; });
+        QList<GapBand> merged;
+        for (const GapBand &b : gapBands) {
+            if (!merged.isEmpty() && b.x0 <= merged.last().x1 + 1.0) {
+                merged.last().x1 = qMax(merged.last().x1, b.x1);
+            } else {
+                merged.append(b);
+            }
+        }
+        QColor gapCol(219, 60, 60);
+        gapCol.setAlpha(60);
+        p.setPen(Qt::NoPen);
+        p.setBrush(gapCol);
+        for (const GapBand &b : merged) {
+            const double x0 = qBound(plot.left(), b.x0, plot.right());
+            const double x1 = qBound(plot.left(), b.x1, plot.right());
+            if (x1 - x0 < 1.0) { continue; }
+            p.drawRect(QRectF(x0, plot.top(), x1 - x0, plot.height()));
+        }
+    }
+
+    si = 0;
+    for (const auto &path : paths) {
         QPen pen(colors.at(si % static_cast<int>(colors.size())));
         pen.setWidthF(2.0);
         pen.setCapStyle(Qt::RoundCap);

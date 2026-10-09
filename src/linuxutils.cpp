@@ -5,6 +5,7 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -131,6 +132,9 @@ std::optional<qint64> parseProcStatusSwap(const QString &content) {
 
 QVector<SensorInfo> readHwmonSensors(QVector<FanInfo> *fans) {
     QVector<SensorInfo> temps;
+    // Callers reuse the vector across refreshes; start from a clean slate
+    // or fan entries accumulate on every poll.
+    if (fans) fans->clear();
     const QDir hw("/sys/class/hwmon");
     for (const auto &e : hw.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString base = hw.filePath(e);
@@ -163,6 +167,130 @@ QVector<SensorInfo> readHwmonSensors(QVector<FanInfo> *fans) {
         }
     }
     return temps;
+}
+
+QString readBatteryStatus() {
+    QDir ps("/sys/class/power_supply");
+    QStringList statuses;
+    for (const auto &e : ps.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString base = ps.filePath(e);
+        if (readText(base + "/type").compare("Battery", Qt::CaseInsensitive) != 0) continue;
+        statuses << readText(base + "/status");
+    }
+    return statuses.join(" + ");
+}
+
+double readSwapTotalMiB() {
+    for (const auto &line : readText("/proc/meminfo").split('\n')) {
+        if (line.startsWith("SwapTotal:")) {
+            // value is in kB
+            return parseNumber(line.section(':', 1).trimmed().section(' ', 0, 0)) / 1024.0;
+        }
+    }
+    return lmNaN();
+}
+
+double readMemTotalMiB() {
+    for (const auto &line : readText("/proc/meminfo").split('\n')) {
+        if (line.startsWith("MemTotal:")) {
+            // value is in kB
+            return parseNumber(line.section(':', 1).trimmed().section(' ', 0, 0)) / 1024.0;
+        }
+    }
+    return lmNaN();
+}
+
+double readMemAvailableMiB() {
+    for (const auto &line : readText("/proc/meminfo").split('\n')) {
+        if (line.startsWith("MemAvailable:")) {
+            // value is in kB
+            return parseNumber(line.section(':', 1).trimmed().section(' ', 0, 0)) / 1024.0;
+        }
+    }
+    return lmNaN();
+}
+
+std::optional<OomInfo> parseOomKernelLine(const QString &line) {
+    // short-unix: "<epoch.micros> <host> kernel: <message>"
+    const int sp = line.indexOf(' ');
+    if (sp <= 0) return std::nullopt;
+    const qint64 ts = static_cast<qint64>(std::llround(line.left(sp).toDouble()));
+    const QString msg = line.mid(sp + 1);
+    static const QRegularExpression head(
+        QStringLiteral("Out of memory: Killed process (\\d+) \\(([^)]*)\\)"),
+        QRegularExpression::CaseInsensitiveOption);
+    const auto m = head.match(msg);
+    if (!m.hasMatch()) return std::nullopt;
+    OomInfo e;
+    e.timestamp = ts;
+    e.pid = m.captured(1).toLongLong();
+    e.name = m.captured(2);
+    e.source = QStringLiteral("kernel");
+    static const QRegularExpression rss(QStringLiteral("anon-rss:(\\d+)kB"));
+    const auto r = rss.match(msg);
+    if (r.hasMatch()) e.rssMiB = r.captured(1).toDouble() / 1024.0;
+    // "UID:1000" (newer kernels) or "UID 1000" (older)
+    static const QRegularExpression uid(QStringLiteral("\\bUID[ :](\\d+)"));
+    const auto u = uid.match(msg);
+    if (u.hasMatch()) e.detail = QStringLiteral("uid %1").arg(u.captured(1));
+    return e;
+}
+
+std::optional<OomInfo> parseOomOomdLine(const QString &line) {
+    const int sp = line.indexOf(' ');
+    if (sp <= 0) return std::nullopt;
+    const qint64 ts = static_cast<qint64>(std::llround(line.left(sp).toDouble()));
+    const QString msg = line.mid(sp + 1);
+    if (!msg.contains(QStringLiteral("systemd-oomd["))) return std::nullopt;
+    const int k = msg.indexOf(QStringLiteral(": Killed "));
+    if (k < 0) return std::nullopt;
+    // Target is the cgroup path between "Killed " and " due to ".
+    const int after = k + static_cast<int>(qstrlen(": Killed "));
+    int end = msg.indexOf(QStringLiteral(" due to "), after);
+    QString detail;
+    if (end >= 0) {
+        detail = msg.mid(end + 1); // "due to memory pressure for ..."
+    } else {
+        end = msg.size();
+    }
+    const QString target = msg.mid(after, end - after);
+    OomInfo e;
+    e.timestamp = ts;
+    e.source = QStringLiteral("systemd-oomd");
+    e.detail = detail;
+    const int slash = target.lastIndexOf('/');
+    e.name = slash >= 0 ? target.mid(slash + 1) : target;
+    if (e.name.endsWith(QStringLiteral(".service")))
+        e.name.chop(static_cast<int>(qstrlen(".service")));
+    return e;
+}
+
+QVector<OomInfo> readOomEvents(int days) {
+    QVector<OomInfo> out;
+    const QString since = QStringLiteral("--since=%1 days ago").arg(days);
+    int rc = -1;
+    const QByteArray kernel = runCommand(QStringLiteral("journalctl"),
+        {QStringLiteral("-k"), QStringLiteral("-q"), QStringLiteral("--no-pager"),
+         QStringLiteral("-o"), QStringLiteral("short-unix"), since}, 30000, &rc);
+    if (rc == 0 || !kernel.isEmpty()) {
+        const QStringList lines = QString::fromLocal8Bit(kernel).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        for (const auto &l : lines) {
+            if (auto e = parseOomKernelLine(l)) out.push_back(*e);
+        }
+    }
+    rc = -1;
+    const QByteArray oomd = runCommand(QStringLiteral("journalctl"),
+        {QStringLiteral("-u"), QStringLiteral("systemd-oomd"), QStringLiteral("-q"),
+         QStringLiteral("--no-pager"), QStringLiteral("-o"), QStringLiteral("short-unix"), since}, 30000, &rc);
+    if (rc == 0 || !oomd.isEmpty()) {
+        const QStringList lines = QString::fromLocal8Bit(oomd).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        for (const auto &l : lines) {
+            if (auto e = parseOomOomdLine(l)) out.push_back(*e);
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const OomInfo &a, const OomInfo &b) { return a.timestamp > b.timestamp; });
+    return out;
 }
 
 } // namespace LinuxUtils

@@ -17,12 +17,13 @@ public:
     ~MetricsDatabase();
     bool open(QString *error = nullptr);
     bool insert(const SystemMetric &m, QString *error = nullptr);
+    // Merge per-process daily aggregates (CPU seconds, peak RSS) into
+    // procs_daily for the calendar day starting at `dayStart`.
+    bool mergeProcessDaily(qint64 dayStart, const QVector<ProcDailyAgg> &procs, QString *error = nullptr);
     bool maintain(qint64 now, const RetentionPolicy &policy = {}, QString *error = nullptr);
     bool maintain(qint64 now, QString *error) { return maintain(now, RetentionPolicy{}, error); }
     std::optional<SystemMetric> latestSystem() const;
     QVector<GpuMetric> latestGpus() const;
-    // Latest top-20 rankings: {cpu-ranked, mem-ranked}.
-    QVector<ProcInfo> latestProcs() const;
     QVector<SystemMetric> systemHistory(qint64 from, qint64 to, int targetPoints = 900) const;
     QVector<BandPoint> systemHistoryBands(qint64 from, qint64 to, int numBands = 100) const;
     QVector<SystemMetric> gpuHistory(const QString &gpuId, qint64 from, qint64 to, int targetPoints = 900) const;
@@ -47,6 +48,9 @@ private:
     bool migrateToV3(QString *error);
     bool migrateToV4(QString *error);
     bool migrateToV5(QString *error);
+    bool migrateToV6(QString *error);
+    bool migrateToV7(QString *error);
+    bool migrateToV8(QString *error);
     bool hasTable(const QString &name) const;
     QStringList tableColumns(const QString &table) const;
     static void bindScaledOrNull(QSqlQuery &q, const QString &name, double value, double scale);
@@ -54,4 +58,8 @@ private:
     QString path_;
     QString connectionName_;
     mutable QSqlDatabase db_;
+    // Battery health persists once per UTC day (plus on value change); these
+    // track the last value actually written so in-between samples store NULL.
+    qint64 lastHealthDay_ = -1;
+    double lastHealthStored_ = lmNaN();
 };

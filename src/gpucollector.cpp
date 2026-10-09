@@ -1,5 +1,8 @@
 #include "gpucollector.h"
 #include "linuxutils.h"
+#ifdef __APPLE__
+#include "macosutils.h"
+#endif
 
 #include <QDir>
 #include <QFileInfo>
@@ -14,6 +17,28 @@
 using namespace LinuxUtils;
 
 QVector<GpuMetric> GpuCollector::collect() {
+#ifdef __APPLE__
+    // Apple Silicon: one integrated GPU; utilization comes from the
+    // IOAccelerator registry and temperature from the SMC GPU channel.
+    // Unified memory means there is no separate VRAM usage to report.
+    QVector<GpuMetric> out;
+    GpuMetric g;
+    g.id = QStringLiteral("apple:gpu0");
+    g.vendor = QStringLiteral("Apple");
+    g.name = MacUtils::gpuModelName();
+    g.driver = QStringLiteral("AGX");
+    g.state = QStringLiteral("active");
+    const double util = MacUtils::gpuUtilizationPct();
+    if (std::isfinite(util)) g.utilization = util;
+    double gpuTemp = lmNaN();
+    for (const char *k : {"Tg05", "Tg0D", "Tg04"}) {
+        const double t = MacUtils::smcTemperature(k);
+        if (std::isfinite(t) && (!std::isfinite(gpuTemp) || t > gpuTemp)) gpuTemp = t;
+    }
+    if (std::isfinite(gpuTemp)) g.temperatureC = gpuTemp;
+    out.push_back(g);
+    return out;
+#else
     QVector<GpuMetric> out;
     auto intel = collectIntel();
     auto nvidia = collectNvidia();
@@ -25,6 +50,7 @@ QVector<GpuMetric> GpuCollector::collect() {
     for (auto &g : amd) out.push_back(g);
     for (auto &g : npu) out.push_back(g);
     return out;
+#endif
 }
 
 QString GpuCollector::normalizeNvidiaBusId(const QString &bus) {

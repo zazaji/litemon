@@ -10,6 +10,9 @@ int main(int argc, char **argv) {
     QCoreApplication::setApplicationName("litemon-test");
     QTemporaryDir tmp;
     qputenv("XDG_CONFIG_HOME", tmp.path().toUtf8());
+    // Point XDG_RUNTIME_DIR away from the real session so the autostart toggle
+    // exercises the XDG fallback instead of running real systemctl commands.
+    qputenv("XDG_RUNTIME_DIR", (tmp.path() + "/runtime").toUtf8());
     AppConfig c;
     c.sampleIntervalSec = 70;
     c.gpuIntervalSec = 130;

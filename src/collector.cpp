@@ -41,6 +41,7 @@ SystemCollector::SystemCollector() {
     rateTimer_.start();
 }
 
+#ifndef __APPLE__ // Linux /proc implementations; macOS lives in collector_mac.cpp
 SystemCollector::CpuTicks SystemCollector::readCpuTicks() const {
     QFile f("/proc/stat");
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
@@ -90,7 +91,9 @@ QMap<int, SystemCollector::CpuTicks> SystemCollector::readCpuCoreTicks() const {
     }
     return out;
 }
+#endif // __APPLE__
 
+// Shared with macOS: utilization from two tick snapshots.
 static double cpuUsageBetween(quint64 total, quint64 idle, quint64 lastTotal, quint64 lastIdle) {
     if (total <= lastTotal) return lmNaN();
     const quint64 dt = total - lastTotal;
@@ -98,6 +101,7 @@ static double cpuUsageBetween(quint64 total, quint64 idle, quint64 lastTotal, qu
     return std::clamp((1.0 - static_cast<double>(di) / static_cast<double>(dt)) * 100.0, 0.0, 100.0);
 }
 
+#ifndef __APPLE__
 void SystemCollector::collectMemory(SystemMetric &m) const {
     QFile f("/proc/meminfo");
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
@@ -116,12 +120,14 @@ void SystemCollector::collectMemory(SystemMetric &m) const {
     }
     const double total = kb.value("MemTotal", lmNaN());
     const double available = kb.value("MemAvailable", lmNaN());
-    if (std::isfinite(total)) m.memoryTotalMiB = total / 1024.0;
-    if (std::isfinite(total) && std::isfinite(available)) m.memoryUsedMiB = (total - available) / 1024.0;
+    if (std::isfinite(total) && std::isfinite(available) && total > 0) {
+        m.memoryUsedPct = (total - available) / total * 100.0;
+    }
     const double swTotal = kb.value("SwapTotal", lmNaN());
     const double swFree = kb.value("SwapFree", lmNaN());
-    if (std::isfinite(swTotal)) m.swapTotalMiB = swTotal / 1024.0;
-    if (std::isfinite(swTotal) && std::isfinite(swFree)) m.swapUsedMiB = (swTotal - swFree) / 1024.0;
+    if (std::isfinite(swTotal) && std::isfinite(swFree) && swTotal > 0) {
+        m.swapUsedPct = (swTotal - swFree) / swTotal * 100.0;
+    }
 }
 
 void SystemCollector::collectLoad(SystemMetric &m) const {
@@ -171,10 +177,15 @@ void SystemCollector::collectTemperature(SystemMetric &m) const {
 
 void SystemCollector::collectBattery(SystemMetric &m) const {
     QDir ps("/sys/class/power_supply");
-    double energyNow = 0, energyFull = 0, energyDesign = 0, power = 0;
+    double energyNow = 0, energyFull = 0, power = 0;
     double pctSum = 0; int pctCount = 0; bool any = false;
     double tempSum = 0; int tempCount = 0;
     QStringList statuses;
+    // Health barely changes: read energy_full_design only once per UTC day
+    // and serve every sample in between from the cached ratio.
+    const qint64 healthDay = QDateTime::currentSecsSinceEpoch() / 86400;
+    const bool recomputeHealth = healthDay != lastHealthDay_;
+    double energyDesign = 0;
     for (const auto &e : ps.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString base = ps.filePath(e);
         if (readText(base + "/type").compare("Battery", Qt::CaseInsensitive) != 0) continue;
@@ -191,7 +202,7 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
         };
         energyNow += readEnergy("energy_now", "charge_now");
         energyFull += readEnergy("energy_full", "charge_full");
-        energyDesign += readEnergy("energy_full_design", "charge_full_design");
+        if (recomputeHealth) energyDesign += readEnergy("energy_full_design", "charge_full_design");
         if (auto p = readDouble(base + "/power_now")) power += *p / 1e6;
         else {
             const auto cur = readDouble(base + "/current_now");
@@ -204,13 +215,21 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
     if (!any) return;
     if (energyFull > 0 && energyNow >= 0) m.batteryPercent = std::clamp(energyNow / energyFull * 100.0, 0.0, 100.0);
     else if (pctCount) m.batteryPercent = pctSum / pctCount;
-    if (energyDesign > 0 && energyFull > 0) m.batteryHealthPercent = std::clamp(energyFull / energyDesign * 100.0, 0.0, 150.0);
+    if (recomputeHealth) {
+        lastHealthDay_ = healthDay;
+        // On a glitched read keep yesterday's value rather than poisoning the
+        // whole day with NaN.
+        if (energyDesign > 0 && energyFull > 0)
+            cachedHealth_ = std::clamp(energyFull / energyDesign * 100.0, 0.0, 150.0);
+    }
+    if (std::isfinite(cachedHealth_)) m.batteryHealthPercent = cachedHealth_;
     const bool charging = std::any_of(statuses.cbegin(), statuses.cend(), [](const QString &s){ return s.compare("Charging", Qt::CaseInsensitive) == 0; });
     const bool discharging = std::any_of(statuses.cbegin(), statuses.cend(), [](const QString &s){ return s.compare("Discharging", Qt::CaseInsensitive) == 0; });
     m.batteryPowerW = (discharging && !charging) ? -power : power;
     if (tempCount > 0) m.batteryTemperatureC = tempSum / tempCount;
     m.batteryStatus = statuses.join(" + ");
 }
+#endif // __APPLE__
 
 // For dedup: prefer "/" over any other mount point of the same device,
 // then the shortest path (bind-mount aliases like /home or /var/tmp of the
@@ -222,6 +241,7 @@ static bool preferMount(const QString &a, const QString &b) {
     return a < b;
 }
 
+#ifndef __APPLE__
 void SystemCollector::collectDisks(SystemMetric &m) const {
     // Parse /proc/mounts directly instead of QStorageInfo::mountedVolumes()
     // because the latter calls stat() on every mount point, which blocks on
@@ -249,11 +269,11 @@ void SystemCollector::collectDisks(SystemMetric &m) const {
             // Use QStorageInfo only for the specific mount, not all volumes
             QStorageInfo vol(mount);
             if (!vol.isValid() || !vol.isReady()) continue;
+            if (vol.bytesTotal() <= 0) continue;
             DiskInfo di;
             di.mountPoint = mount;
-            di.totalGiB = static_cast<double>(vol.bytesTotal()) / 1073741824.0;
-            di.usedGiB = static_cast<double>(vol.bytesTotal() - vol.bytesAvailable()) / 1073741824.0;
-            if (di.totalGiB <= 0) continue;
+            di.usedPct = static_cast<double>(vol.bytesTotal() - vol.bytesAvailable())
+                / static_cast<double>(vol.bytesTotal()) * 100.0;
             const QString dev = QString::fromLocal8Bit(vol.device());
             const auto it = byDevice.find(dev);
             if (it == byDevice.end()) { byDevice.insert(dev, di); }
@@ -268,9 +288,10 @@ void SystemCollector::collectDisks(SystemMetric &m) const {
         if (root.isValid() && root.isReady()) {
             DiskInfo di;
             di.mountPoint = "/";
-            di.totalGiB = static_cast<double>(root.bytesTotal()) / 1073741824.0;
-            di.usedGiB = static_cast<double>(root.bytesTotal() - root.bytesAvailable()) / 1073741824.0;
-            if (di.totalGiB > 0) m.disks.append(di);
+            di.usedPct = root.bytesTotal() > 0
+                ? static_cast<double>(root.bytesTotal() - root.bytesAvailable()) / static_cast<double>(root.bytesTotal()) * 100.0
+                : lmNaN();
+            if (std::isfinite(di.usedPct)) m.disks.append(di);
         }
     }
     std::stable_sort(m.disks.begin(), m.disks.end(), [](const DiskInfo &a, const DiskInfo &b) {
@@ -327,6 +348,7 @@ QVector<SystemCollector::DiskIoCounters> SystemCollector::readDiskCounters() con
     }
     return result;
 }
+#endif // __APPLE__
 
 SystemMetric SystemCollector::collect(bool includeGpu) {
     SystemMetric m;
@@ -393,6 +415,7 @@ SystemMetric SystemCollector::collect(bool includeGpu) {
     return m;
 }
 
+#ifndef __APPLE__
 void SystemCollector::collectPsi(SystemMetric &m) const {
     const auto cpu = parsePsiContent(readText("/proc/pressure/cpu"));
     const auto mem = parsePsiContent(readText("/proc/pressure/memory"));
@@ -442,6 +465,15 @@ void SystemCollector::collectProcesses(SystemMetric &m) const {
                 p.cpuPercent = static_cast<double>(s->cpuTicks - *prev) / kClkTicks / dt * 100.0;
             }
         }
+        // Daily accumulation covers every parsed process, not just the top-20
+        // snapshot: cpuPercent is this window's share, so percent/100*dt is
+        // CPU seconds inside the window.
+        if (std::isfinite(p.cpuPercent) && !p.name.isEmpty()) {
+            auto &agg = dailyProcs_[p.name];
+            agg.name = p.name;
+            agg.cpuSec += p.cpuPercent / 100.0 * dt;
+            if (std::isfinite(p.rssMiB) && !(agg.maxRssMiB > p.rssMiB)) agg.maxRssMiB = p.rssMiB;
+        }
         procs.push_back(p);
     }
     lastProcTicks_ = std::move(cur);
@@ -460,4 +492,13 @@ void SystemCollector::collectProcesses(SystemMetric &m) const {
         return score(a) > score(b);
     });
     m.topProcs = ranked.mid(0, kTopN);
+}
+#endif // __APPLE__
+
+QVector<ProcDailyAgg> SystemCollector::drainProcessDaily() {
+    QVector<ProcDailyAgg> out;
+    out.reserve(dailyProcs_.size());
+    for (const auto &agg : dailyProcs_) out.push_back(agg);
+    dailyProcs_.clear();
+    return out;
 }

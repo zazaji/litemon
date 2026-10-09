@@ -31,8 +31,7 @@ int main(int argc, char **argv) {
     bool ok = true;
     // Regression test for /proc read via QFile::atEnd() (size 0 on procfs):
     // memory must be populated on a normal Linux desktop.
-    ok = checkFinite(m.memoryTotalMiB, "memoryTotalMiB", true) && ok;
-    ok = checkFinite(m.memoryUsedMiB, "memoryUsedMiB", true) && ok;
+    ok = checkFinite(m.memoryUsedPct, "memoryUsedPct", true) && ok;
     ok = checkFinite(m.load1, "load1", true) && ok;
     // Swap may be zero-sized on some machines, but when present it must parse.
     // Rates are expected to be finite (possibly 0) after two samples.
@@ -41,13 +40,8 @@ int main(int argc, char **argv) {
     ok = checkFinite(m.diskReadMiBs, "diskReadMiBs", true) && ok;
     ok = checkFinite(m.diskWriteMiBs, "diskWriteMiBs", true) && ok;
 
-    if (m.memoryTotalMiB <= 0 || m.memoryTotalMiB > 16 * 1024 * 1024) {
-        std::fprintf(stderr, "test_collector FAIL: implausible memoryTotalMiB=%f\n", m.memoryTotalMiB);
-        ok = false;
-    }
-    if (m.memoryUsedMiB < 0 || m.memoryUsedMiB > m.memoryTotalMiB) {
-        std::fprintf(stderr, "test_collector FAIL: implausible memoryUsedMiB=%f (total=%f)\n",
-                     m.memoryUsedMiB, m.memoryTotalMiB);
+    if (m.memoryUsedPct < 0.0 || m.memoryUsedPct > 100.0) {
+        std::fprintf(stderr, "test_collector FAIL: implausible memoryUsedPct=%f\n", m.memoryUsedPct);
         ok = false;
     }
 

@@ -4,8 +4,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QProcessEnvironment>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTextStream>
 #include <algorithm>
 
@@ -31,6 +33,15 @@ AppConfig AppConfig::load() {
     c.collectGpu = s.value("sampling/collect_gpu", c.collectGpu).toBool();
     c.traySensor1 = s.value("tray/sensor1").toString();
     c.traySensor2 = s.value("tray/sensor2").toString();
+    c.traySensor3 = s.value("tray/sensor3").toString();
+    c.traySensor4 = s.value("tray/sensor4").toString();
+    // Fan alarms legitimately exceed 100 (RPM range tops at 10000); the old
+    // 0..100 clamp silently truncated those, so it only bounds the floor now.
+    c.trayAlarm1 = std::clamp(s.value("tray/alarm1", c.trayAlarm1).toDouble(), 0.0, 10000.0);
+    c.trayAlarm2 = std::clamp(s.value("tray/alarm2", c.trayAlarm2).toDouble(), 0.0, 10000.0);
+    c.trayAlarm3 = std::clamp(s.value("tray/alarm3", c.trayAlarm3).toDouble(), 0.0, 10000.0);
+    c.trayAlarm4 = std::clamp(s.value("tray/alarm4", c.trayAlarm4).toDouble(), 0.0, 10000.0);
+    c.traySeparate = s.value("tray/separate", c.traySeparate).toBool();
     const QString t = s.value("ui/theme").toString();
     c.theme = (t == "light" || t == "dark") ? t : "system";
     c.autostart = s.value("ui/autostart", c.autostart).toBool();
@@ -48,6 +59,13 @@ void AppConfig::save() const {
     s.setValue("ui/history_target_points", historyTargetPoints);
     s.setValue("tray/sensor1", traySensor1);
     s.setValue("tray/sensor2", traySensor2);
+    s.setValue("tray/sensor3", traySensor3);
+    s.setValue("tray/sensor4", traySensor4);
+    s.setValue("tray/alarm1", trayAlarm1);
+    s.setValue("tray/alarm2", trayAlarm2);
+    s.setValue("tray/alarm3", trayAlarm3);
+    s.setValue("tray/alarm4", trayAlarm4);
+    s.setValue("tray/separate", traySeparate);
     s.setValue("ui/theme", theme);
     s.setValue("ui/autostart", autostart);
     s.sync();
@@ -61,6 +79,62 @@ QString AppConfig::autostartFilePath() {
 }
 
 bool AppConfig::setAutostartEnabled(bool enable, QString *error) {
+    // Preferred path on Linux: manage real systemd user units so the toggle
+    // is visible in `systemctl --user` and survives across session types.
+    const auto env = QProcessEnvironment::systemEnvironment();
+    const QString runtime = env.value("XDG_RUNTIME_DIR");
+    const QString systemctl = QStandardPaths::findExecutable(QStringLiteral("systemctl"));
+    if (!systemctl.isEmpty() && !runtime.isEmpty()
+        && QFileInfo::exists(runtime + QStringLiteral("/systemd"))) {
+        // Transient systemd-run GUI instances cannot be enabled, so install a
+        // permanent unit next to the collector's and enable both units.
+        QString configHome = env.value("XDG_CONFIG_HOME");
+        if (configHome.isEmpty()) configHome = QDir::homePath() + "/.config";
+        const QString unitDir = configHome + QStringLiteral("/systemd/user");
+        QDir().mkpath(unitDir);
+        QFile unit(unitDir + QStringLiteral("/litemon-gui.service"));
+        if (!unit.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            if (error) *error = QObject::tr("Could not write %1").arg(unit.fileName());
+            return false;
+        }
+        QTextStream out(&unit);
+        out << "[Unit]\n"
+            << "Description=LiteMon GUI\n"
+            << "PartOf=graphical-session.target\n"
+            << "After=graphical-session.target\n\n"
+            << "[Service]\n"
+            << "ExecStart=" << QCoreApplication::applicationFilePath() << "\n"
+            << "Restart=on-failure\n\n"
+            << "[Install]\n"
+            << "WantedBy=graphical-session.target\n";
+        out.flush();
+        unit.close();
+        auto run = [&systemctl](const QStringList &args) {
+            QProcess p;
+            p.start(systemctl, args);
+            return p.waitForFinished(10000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
+        };
+        // Reload picks up the freshly written unit; best effort either way.
+        run({QStringLiteral("--user"), QStringLiteral("daemon-reload")});
+        const QStringList units = {QStringLiteral("litemon-collector.service"),
+                                   QStringLiteral("litemon-gui.service")};
+        QStringList toggle = {QStringLiteral("--user"), enable ? QStringLiteral("enable")
+                                                               : QStringLiteral("disable")};
+        toggle += units;
+        if (!run(toggle)) {
+            if (error) *error = QObject::tr("Could not toggle litemon user services");
+            return false;
+        }
+        if (enable) {
+            // Idempotent when the collector already runs; the running GUI is
+            // left alone so no second instance is started.
+            run({QStringLiteral("--user"), QStringLiteral("start"),
+                 QStringLiteral("litemon-collector.service")});
+        }
+        // A legacy XDG entry would launch a second GUI alongside the unit.
+        QFile::remove(autostartFilePath());
+        return true;
+    }
     const QString path = autostartFilePath();
     if (!enable) {
         if (QFile::exists(path) && !QFile::remove(path)) {
@@ -90,3 +164,24 @@ bool AppConfig::setAutostartEnabled(bool enable, QString *error) {
     f.close();
     return true;
 }
+
+bool AppConfig::setCollectorRunning(bool run, QString *error) {
+    const auto env = QProcessEnvironment::systemEnvironment();
+    const QString runtime = env.value("XDG_RUNTIME_DIR");
+    const QString systemctl = QStandardPaths::findExecutable(QStringLiteral("systemctl"));
+    if (systemctl.isEmpty() || runtime.isEmpty()
+        || !QFileInfo::exists(runtime + QStringLiteral("/systemd"))) {
+        if (error) *error = QObject::tr("systemd user session is not available");
+        return false;
+    }
+    QProcess p;
+    p.start(systemctl, {QStringLiteral("--user"), run ? QStringLiteral("start") : QStringLiteral("stop"),
+                        QStringLiteral("litemon-collector.service")});
+    if (!p.waitForFinished(10000) || p.exitCode() != 0) {
+        if (error) *error = QObject::tr("Could not %1 litemon-collector.service")
+                                 .arg(run ? QStringLiteral("start") : QStringLiteral("stop"));
+        return false;
+    }
+    return true;
+}
+

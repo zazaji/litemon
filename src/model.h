@@ -13,6 +13,9 @@ struct GpuMetric {
     QString driver;
     QString state = "active";
     double utilization = lmNaN();
+    // VRAM usage in percent (used/total*100), the persisted form; used/total
+    // in MiB are live-parse values kept for the snapshot JSON and never stored.
+    double memoryUsedPct = lmNaN();
     double memoryUsedMiB = lmNaN();
     double memoryTotalMiB = lmNaN();
     double temperatureC = lmNaN();
@@ -23,8 +26,7 @@ struct GpuMetric {
 struct DiskInfo {
     qint64 timestamp = 0;
     QString mountPoint;
-    double totalGiB = lmNaN();
-    double usedGiB = lmNaN();
+    double usedPct = lmNaN(); // used capacity, 0-100; totals are constant per mount and read live
     double readMiBs = lmNaN();
     double writeMiBs = lmNaN();
 };
@@ -43,6 +45,18 @@ struct FanInfo {
     double rpm = lmNaN();
 };
 
+// One OOM kill event parsed from the system journal (Linux: kernel
+// oom-killer + systemd-oomd). Live read by the GUI, never persisted.
+// rssMiB is NaN when the log line does not carry it.
+struct OomInfo {
+    qint64 timestamp = 0;
+    qint64 pid = 0;
+    QString name;
+    double rssMiB = lmNaN();
+    QString source; // "kernel" or "systemd-oomd"
+    QString detail;
+};
+
 // One live process snapshot (GUI-side /proc sampling; not stored in history).
 struct ProcInfo {
     qint64 pid = 0;
@@ -56,6 +70,15 @@ struct ProcInfo {
     qint64 threads = 0;
 };
 
+// One per-process daily aggregate (procs_daily domain): total CPU time and
+// peak RSS accumulated by the collector between database merges. Only these
+// long-term per-process numbers are persisted; per-sample rankings are not.
+struct ProcDailyAgg {
+    QString name;
+    double cpuSec = 0.0;    // CPU seconds observed in the accumulation window
+    double maxRssMiB = lmNaN(); // peak RSS MiB in the accumulation window
+};
+
 struct SystemMetric {
     qint64 timestamp = 0;
     double cpuUsage = lmNaN();
@@ -64,10 +87,11 @@ struct SystemMetric {
     // Per-core utilization, indexed by Linux core id (cpu0 -> [0]); NaN when
     // a core reported no delta (e.g. offline between samples).
     QVector<double> cpuCores;
-    double memoryUsedMiB = lmNaN();
-    double memoryTotalMiB = lmNaN();
-    double swapUsedMiB = lmNaN();
-    double swapTotalMiB = lmNaN();
+    // RAM/swap usage in percent (used/capacity*100). Totals never change on a
+    // booted machine, so only the percentage is persisted; the GUI reads the
+    // capacities live from /proc/meminfo when it needs absolute numbers.
+    double memoryUsedPct = lmNaN();
+    double swapUsedPct = lmNaN();
     double networkRxMiBs = lmNaN();
     double networkTxMiBs = lmNaN();
     double diskReadMiBs = lmNaN();
@@ -89,8 +113,8 @@ struct SystemMetric {
     QVector<SensorInfo> sensors;
     QVector<FanInfo> fans;
     // Top-20 process ranking by composite score (CPU%+2)×(10MB+RSS MB),
-    // computed by the collector and persisted (procs_raw/procs_5m domains);
-    // live GUI sampling is separate.
+    // computed by the collector for snapshot output only — never persisted;
+    // long-term per-process history lives in procs_daily instead.
     QVector<ProcInfo> topProcs;
     QVector<GpuMetric> gpus;
 };

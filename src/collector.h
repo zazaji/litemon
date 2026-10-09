@@ -11,6 +11,9 @@ class SystemCollector {
 public:
     SystemCollector();
     SystemMetric collect(bool includeGpu = true);
+    // Return the per-process daily aggregates accumulated since the last
+    // drain (all parsed processes, not just the top-20) and clear them.
+    QVector<ProcDailyAgg> drainProcessDaily();
 
 private:
     struct CpuTicks { quint64 total = 0; quint64 idle = 0; bool valid = false; };
@@ -36,9 +39,17 @@ private:
     QMap<int, CpuTicks> lastCores_;
     IoCounters lastNetwork_;
     QVector<DiskIoCounters> lastDisk_;
-    // Cross-sample state for per-process CPU share (persisted top-20).
+    // Cross-sample state for per-process CPU share (live snapshots and the
+    // procs_daily accumulation).
     mutable QHash<qint64, quint64> lastProcTicks_;
     mutable qint64 lastProcSampleMs_ = 0;
+    // Per-process daily accumulation, keyed by process name; drained into
+    // procs_daily on every database maintenance tick.
+    mutable QHash<QString, ProcDailyAgg> dailyProcs_;
+    // Battery health is near-constant: recomputed from energy_full_design at
+    // most once per UTC day and reused for every sample in between.
+    mutable double cachedHealth_ = lmNaN();
+    mutable qint64 lastHealthDay_ = -1;
     QElapsedTimer rateTimer_;
     GpuCollector gpuCollector_;
 };

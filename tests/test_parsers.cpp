@@ -119,6 +119,40 @@ int main(int argc, char **argv) {
         expect(rects.size() == 1 && !rects[0].isValid(), "empty rect rejected");
     }
 
+    // OOM kernel line: short-unix timestamp, pid, comm, anon-rss, UID.
+    {
+        const auto e = parseOomKernelLine(
+            "1759700000.123456 +0800 localhost kernel: Out of memory: Killed process 12345 (chrome) "
+            "total-vm:20480000kB, anon-rss:524288kB, file-rss:0kB, shmem-rss:0kB, UID:1000, pgtables:2048kB oom_score_adj:0");
+        expect(e.has_value(), "oom kernel line parsed");
+        if (e) {
+            expect(e->timestamp == 1759700000, "oom kernel timestamp");
+            expect(e->pid == 12345, "oom kernel pid");
+            expect(e->name == QLatin1String("chrome"), "oom kernel comm");
+            expectClose(e->rssMiB, 512.0, "oom kernel rss");
+            expect(e->source == QLatin1String("kernel"), "oom kernel source");
+        }
+    }
+    // Unrelated kernel lines must not match.
+    expect(!parseOomKernelLine("1759700000.000000 +0800 localhost kernel: oom_reaper: reaped process 1 (test)"),
+           "oom reaper line ignored");
+
+    // systemd-oomd line: cgroup path -> tail segment, .service suffix stripped.
+    {
+        const auto e = parseOomOomdLine(
+            "1759800000.000000 +0800 localhost systemd-oomd[512]: Killed /user.slice/user-1000.slice/"
+            "user@1000.service/app.slice/app-firefox.service due to memory pressure for /user.slice/user-1000.slice/user@1000.service");
+        expect(e.has_value(), "oomd line parsed");
+        if (e) {
+            expect(e->timestamp == 1759800000, "oomd timestamp");
+            expect(e->name == QLatin1String("app-firefox"), "oomd cgroup tail");
+            expect(e->pid == 0, "oomd has no pid");
+            expect(!std::isfinite(e->rssMiB), "oomd rss NaN");
+            expect(e->source == QLatin1String("systemd-oomd"), "oomd source");
+            expect(e->detail.contains(QLatin1String("memory pressure")), "oomd detail");
+        }
+    }
+
     if (failures > 0) return 1;
     std::puts("Parsers PASS");
     return 0;

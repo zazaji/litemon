@@ -15,7 +15,7 @@
 #include <cmath>
 #include <algorithm>
 
-// Storage format (schema v4): SQLite has no float16 type — REAL always costs
+// Storage format (schema v8): SQLite has no float16 type — REAL always costs
 // 8 bytes — so low-precision metrics are stored as scaled INTEGERs
 // (fixed-point). SQLite packs small integers in 1-3 bytes, roughly 3-4x
 // smaller than REALs, with precision matched to display needs:
@@ -23,9 +23,12 @@
 //   percent (cpu, per-core, battery)  x10    (0.1%)
 //   temperature ............... x10    (0.1 C)
 //   load1 ..................... x100
-//   memory/swap (MiB) ......... x1     (whole MiB)
+//   memory/swap/disk usage .... x10    (0.1%) — capacities are constant, so
+//                                       only the usage percentage is stored
+//   GPU VRAM usage ............ x10    (0.1%) — VRAM capacity is constant per
+//                                       device; absolute used/total MiB stay
+//                                       live snapshot values
 //   rates (MiB/s) ............. x1000  (0.001 MiB/s)
-//   disk usage (GiB) .......... x100   (0.01 GiB)
 //   power (W) ................. x100   (0.01 W)
 //   frequency (MHz) ........... x1
 // NULL still means unknown; in-memory model stays double, scaling happens
@@ -58,7 +61,7 @@ bool MetricsDatabase::open(QString *error) {
 }
 
 bool MetricsDatabase::execSchema(QString *error) {
-    // v4 layout: two tables per domain. *_raw holds fine samples for the last
+    // v8 layout: two tables per domain. *_raw holds fine samples for the last
     // `detailDays` calendar days; *_5m holds compressed 5-minute averages for
     // the long-term archive. All metric columns are scaled INTEGERs (see top).
     // Per-core CPU utilization lives in its own domain (cpu_cores_*) because
@@ -66,16 +69,15 @@ bool MetricsDatabase::execSchema(QString *error) {
     const QString systemCols = R"(
         ts INTEGER PRIMARY KEY,
         cpu_usage INTEGER, cpu_temp INTEGER, load1 INTEGER,
-        mem_used INTEGER, mem_total INTEGER, swap_used INTEGER, swap_total INTEGER,
+        mem_pct INTEGER, swap_pct INTEGER,
         net_rx INTEGER, net_tx INTEGER, disk_read INTEGER, disk_write INTEGER,
-        disk_used INTEGER, disk_total INTEGER,
         battery_percent INTEGER, battery_power INTEGER, battery_health INTEGER, battery_status TEXT,
         psi_cpu INTEGER, psi_mem INTEGER, psi_io INTEGER, sensors TEXT,
         nvme_temp INTEGER, bat_temp INTEGER
     )";
     const QString gpuCols = R"(
         ts INTEGER NOT NULL, id TEXT NOT NULL, vendor TEXT, name TEXT, driver TEXT, state TEXT,
-        util INTEGER, mem_used INTEGER, mem_total INTEGER, temp INTEGER, power INTEGER, freq INTEGER,
+        util INTEGER, mem_pct INTEGER, temp INTEGER, power INTEGER, freq INTEGER,
         PRIMARY KEY(ts,id)
     )";
     const QString cpuCoreCols = R"(
@@ -83,18 +85,8 @@ bool MetricsDatabase::execSchema(QString *error) {
         PRIMARY KEY(ts,core)
     )";
     const QString diskCols = R"(
-        ts INTEGER NOT NULL, mount TEXT NOT NULL, total INTEGER, used INTEGER,
+        ts INTEGER NOT NULL, mount TEXT NOT NULL, used_pct INTEGER,
         PRIMARY KEY(ts,mount)
-    )";
-    const QString procsCols = R"(
-        ts INTEGER NOT NULL, kind TEXT NOT NULL, rank INTEGER NOT NULL,
-        name TEXT NOT NULL, pid INTEGER, cpu INTEGER, rss INTEGER,
-        PRIMARY KEY(ts,kind,rank)
-    )";
-    const QString procs5Cols = R"(
-        ts INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
-        avg_cpu INTEGER, max_rss INTEGER,
-        PRIMARY KEY(ts,kind,name)
     )";
     QSqlQuery q(db_);
     const QStringList stmts = {
@@ -107,16 +99,14 @@ bool MetricsDatabase::execSchema(QString *error) {
         "CREATE TABLE IF NOT EXISTS cpu_cores_5m (" + cpuCoreCols + ")",
         "CREATE TABLE IF NOT EXISTS disks_raw (" + diskCols + ")",
         "CREATE TABLE IF NOT EXISTS disks_5m (" + diskCols + ")",
-        "CREATE TABLE IF NOT EXISTS procs_raw (" + procsCols + ")",
-        "CREATE TABLE IF NOT EXISTS procs_5m (" + procs5Cols + ")",
+        // Per-process daily aggregates (introduced in v7); part of the v8 layout.
+        "CREATE TABLE IF NOT EXISTS procs_daily (day INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, cpu_sec INTEGER, max_rss INTEGER, PRIMARY KEY(day,kind,name))",
         "CREATE INDEX IF NOT EXISTS idx_gpu_raw_id_ts ON gpu_raw(id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_gpu_5m_id_ts ON gpu_5m(id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_cpu_cores_raw_core_ts ON cpu_cores_raw(core,ts)",
         "CREATE INDEX IF NOT EXISTS idx_cpu_cores_5m_core_ts ON cpu_cores_5m(core,ts)",
         "CREATE INDEX IF NOT EXISTS idx_disks_raw_mount_ts ON disks_raw(mount,ts)",
-        "CREATE INDEX IF NOT EXISTS idx_disks_5m_mount_ts ON disks_5m(mount,ts)",
-        "CREATE INDEX IF NOT EXISTS idx_procs_raw_ts ON procs_raw(ts)",
-        "CREATE INDEX IF NOT EXISTS idx_procs_5m_ts ON procs_5m(ts)"
+        "CREATE INDEX IF NOT EXISTS idx_disks_5m_mount_ts ON disks_5m(mount,ts)"
     };
     for (const auto &s : stmts) if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
     return true;
@@ -129,62 +119,6 @@ void MetricsDatabase::bindScaledOrNull(QSqlQuery &q, const QString &name, double
 
 static double sqlScaled(const QVariant &v, double scale) { return v.isNull() ? lmNaN() : v.toDouble() / scale; }
 
-// Live hwmon snapshot as JSON ("{"temperatures":[...],"fans":[...]}").
-// Per-channel detail (e.g. one temperature per CPU core) is deliberately NOT
-// persisted: it is redundant with cpu_usage history and duplicates within the
-// same chip, so each chip contributes only its hottest channel here. The GUI
-// enumerates full detail live from /sys/class/hwmon. Stored per raw sample;
-// display only needs the latest row, so it is not aggregated into system_5m.
-static QString sensorsToJson(const QVector<SensorInfo> &sensors, const QVector<FanInfo> &fans) {
-    QHash<QString, QJsonObject> hottest;
-    for (const auto &s : sensors) {
-        QJsonObject o;
-        o.insert("chip", s.chip);
-        o.insert("label", s.label);
-        o.insert("tempC", static_cast<double>(std::llround(s.tempC * 10.0)) / 10.0);
-        const auto it = hottest.find(s.chip);
-        if (it == hottest.end() || s.tempC > it->value("tempC").toDouble()) hottest.insert(s.chip, o);
-    }
-    QJsonObject root;
-    QJsonArray temps;
-    for (const auto &o : hottest) temps.append(o);
-    root.insert("temperatures", temps);
-    QJsonArray frs;
-    for (const auto &f : fans) {
-        QJsonObject o;
-        o.insert("chip", f.chip);
-        o.insert("label", f.label);
-        o.insert("rpm", std::llround(f.rpm));
-        frs.append(o);
-    }
-    root.insert("fans", frs);
-    return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
-}
-
-static void parseSensorsJson(const QString &json, QVector<SensorInfo> &sensors, QVector<FanInfo> &fans) {
-    const auto doc = QJsonDocument::fromJson(json.toUtf8());
-    if (!doc.isObject()) return;
-    const auto root = doc.object();
-    for (const auto &v : root.value("temperatures").toArray()) {
-        const auto o = v.toObject();
-        SensorInfo s;
-        s.chip = o.value("chip").toString();
-        s.label = o.value("label").toString();
-        s.tempC = o.value("tempC").toDouble();
-        if (s.chip.isEmpty()) continue;
-        sensors.push_back(s);
-    }
-    for (const auto &v : root.value("fans").toArray()) {
-        const auto o = v.toObject();
-        FanInfo f;
-        f.chip = o.value("chip").toString();
-        f.label = o.value("label").toString();
-        f.rpm = o.value("rpm").toDouble();
-        if (f.chip.isEmpty()) continue;
-        fans.push_back(f);
-    }
-}
-
 // A GPU row carries signal when at least one primary metric (utilization,
 // temperature, power, memory used) has a real reading. Rows with only
 // secondary data (e.g. a bare frequency value, or all-NaN placeholders)
@@ -192,8 +126,8 @@ static void parseSensorsJson(const QString &json, QVector<SensorInfo> &sensors, 
 // they are neither stored nor shown.
 static bool gpuHasSignal(const GpuMetric &g) {
     return std::isfinite(g.utilization) || std::isfinite(g.temperatureC)
-        || std::isfinite(g.powerW) || std::isfinite(g.memoryUsedMiB)
-        || std::isfinite(g.frequencyMHz);
+        || std::isfinite(g.powerW) || std::isfinite(g.memoryUsedPct)
+        || std::isfinite(g.memoryUsedMiB) || std::isfinite(g.frequencyMHz);
 }
 
 // Mount points that should never appear as user-facing disk entries. Shared
@@ -209,23 +143,25 @@ static bool isUserFacingMount(const QString &m) {
 bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
     // Drop redundant data before touching the database: GPUs without signal,
     // offline per-core slots (NaN), and samples where every field is empty.
+    // Readout-only values (load1, PSI, battery_status, sensors JSON, per-disk
+    // usage in system_raw) are deliberately NOT written here: they are only
+    // ever shown as live numbers, so the GUI reads them straight from /proc
+    // and /sys instead of from the database. nvme_temp/bat_temp stay because
+    // the temperature charts draw curves from history.
     QVector<GpuMetric> gpus;
     gpus.reserve(m.gpus.size());
     for (const auto &g : m.gpus) {
         if (gpuHasSignal(g)) gpus.push_back(g);
     }
     auto sysEmpty = [&] {
-        const double vals[] = {m.cpuUsage, m.cpuTemperatureC, m.load1,
-            m.memoryUsedMiB, m.memoryTotalMiB, m.swapUsedMiB, m.swapTotalMiB,
+        const double vals[] = {m.cpuUsage, m.cpuTemperatureC,
+            m.memoryUsedPct, m.swapUsedPct,
             m.networkRxMiBs, m.networkTxMiBs, m.diskReadMiBs, m.diskWriteMiBs,
             m.batteryPercent, m.batteryPowerW, m.batteryHealthPercent,
-            m.psiCpuSome, m.psiMemSome, m.psiIoSome};
+            m.nvmeTemperatureC, m.batteryTemperatureC};
         for (double v : vals) { if (std::isfinite(v)) return false; }
-        if (!m.batteryStatus.isEmpty()) return false;
         if (!gpus.isEmpty()) return false;
         if (!m.disks.isEmpty()) return false;
-        if (!m.sensors.isEmpty() || !m.fans.isEmpty()) return false;
-        if (!m.topProcs.isEmpty()) return false;
         for (double v : m.cpuCores) { if (std::isfinite(v)) return false; }
         return true;
     };
@@ -233,31 +169,36 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
     if (!db_.transaction()) { if (error) *error = db_.lastError().text(); return false; }
     QSqlQuery q(db_);
     q.prepare(R"(INSERT OR REPLACE INTO system_raw
-        (ts,cpu_usage,cpu_temp,load1,mem_used,mem_total,swap_used,swap_total,
-         net_rx,net_tx,disk_read,disk_write,disk_used,disk_total,
-         battery_percent,battery_power,battery_health,battery_status,
-         psi_cpu,psi_mem,psi_io,sensors,nvme_temp,bat_temp)
-        VALUES(:ts,:cpu,:ct,:load,:mu,:mt,:su,:st,:nrx,:ntx,:dr,:dw,:du,:dt,:bp,:bw,:bh,:bs,:pc,:pm,:pi,:sn,:nt,:bt))");
+        (ts,cpu_usage,cpu_temp,mem_pct,swap_pct,
+         net_rx,net_tx,disk_read,disk_write,
+         battery_percent,battery_power,battery_health,nvme_temp,bat_temp)
+        VALUES(:ts,:cpu,:ct,:mp,:sp,:nrx,:ntx,:dr,:dw,:bp,:bw,:bh,:nt,:bt))");
     q.bindValue(":ts", m.timestamp);
-    bindScaledOrNull(q,":cpu",m.cpuUsage,10.0); bindScaledOrNull(q,":ct",m.cpuTemperatureC,10.0); bindScaledOrNull(q,":load",m.load1,100.0);
-    bindScaledOrNull(q,":mu",m.memoryUsedMiB,1.0); bindScaledOrNull(q,":mt",m.memoryTotalMiB,1.0); bindScaledOrNull(q,":su",m.swapUsedMiB,1.0); bindScaledOrNull(q,":st",m.swapTotalMiB,1.0);
+    bindScaledOrNull(q,":cpu",m.cpuUsage,10.0); bindScaledOrNull(q,":ct",m.cpuTemperatureC,10.0);
+    bindScaledOrNull(q,":mp",m.memoryUsedPct,10.0); bindScaledOrNull(q,":sp",m.swapUsedPct,10.0);
     bindScaledOrNull(q,":nrx",m.networkRxMiBs,1000.0); bindScaledOrNull(q,":ntx",m.networkTxMiBs,1000.0); bindScaledOrNull(q,":dr",m.diskReadMiBs,1000.0); bindScaledOrNull(q,":dw",m.diskWriteMiBs,1000.0);
-    // Store root disk (first disk) in system_raw for backward compatibility
-    const double rootUsed = m.disks.isEmpty() ? lmNaN() : m.disks[0].usedGiB;
-    const double rootTotal = m.disks.isEmpty() ? lmNaN() : m.disks[0].totalGiB;
-    bindScaledOrNull(q,":du",rootUsed,100.0); bindScaledOrNull(q,":dt",rootTotal,100.0); bindScaledOrNull(q,":bp",m.batteryPercent,10.0); bindScaledOrNull(q,":bw",m.batteryPowerW,100.0); bindScaledOrNull(q,":bh",m.batteryHealthPercent,10.0);
-    if (m.batteryStatus.isEmpty()) q.bindValue(":bs", QVariant());
-    else q.bindValue(":bs", m.batteryStatus);
-    bindScaledOrNull(q,":pc",m.psiCpuSome,100.0); bindScaledOrNull(q,":pm",m.psiMemSome,100.0); bindScaledOrNull(q,":pi",m.psiIoSome,100.0);
-    if (m.sensors.isEmpty() && m.fans.isEmpty()) q.bindValue(":sn", QVariant());
-    else q.bindValue(":sn", sensorsToJson(m.sensors, m.fans));
+    bindScaledOrNull(q,":bp",m.batteryPercent,10.0); bindScaledOrNull(q,":bw",m.batteryPowerW,100.0);
+    // Health is a slow-moving full/design ratio: persist it once per UTC day
+    // and whenever the value itself moves, not on every sample.
+    const qint64 healthDay = m.timestamp - (m.timestamp % 86400);
+    const bool storeHealth = std::isfinite(m.batteryHealthPercent)
+        && (healthDay != lastHealthDay_
+            || std::abs(m.batteryHealthPercent - lastHealthStored_) >= 0.1);
+    if (storeHealth) { lastHealthDay_ = healthDay; lastHealthStored_ = m.batteryHealthPercent; }
+    bindScaledOrNull(q,":bh",storeHealth?m.batteryHealthPercent:lmNaN(),10.0);
     bindScaledOrNull(q,":nt",m.nvmeTemperatureC,10.0); bindScaledOrNull(q,":bt",m.batteryTemperatureC,10.0);
     if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
 
-    q.prepare(R"(INSERT OR REPLACE INTO gpu_raw VALUES(:ts,:id,:vendor,:name,:driver,:state,:u,:mu,:mt,:temp,:power,:freq))");
+    q.prepare(R"(INSERT OR REPLACE INTO gpu_raw VALUES(:ts,:id,:vendor,:name,:driver,:state,:u,:mp,:temp,:power,:freq))");
     for (const auto &g : gpus) {
         q.bindValue(":ts",m.timestamp); q.bindValue(":id",g.id); q.bindValue(":vendor",g.vendor); q.bindValue(":name",g.name); q.bindValue(":driver",g.driver); q.bindValue(":state",g.state);
-        bindScaledOrNull(q,":u",g.utilization,10.0); bindScaledOrNull(q,":mu",g.memoryUsedMiB,1.0); bindScaledOrNull(q,":mt",g.memoryTotalMiB,1.0); bindScaledOrNull(q,":temp",g.temperatureC,10.0); bindScaledOrNull(q,":power",g.powerW,100.0); bindScaledOrNull(q,":freq",g.frequencyMHz,1.0);
+        bindScaledOrNull(q,":u",g.utilization,10.0);
+        // Only the VRAM percentage is stored; the absolute used/total MiB are
+        // live values (snapshot JSON) and would be a per-sample waste anyway.
+        const double memPct = (std::isfinite(g.memoryUsedMiB) && std::isfinite(g.memoryTotalMiB) && g.memoryTotalMiB > 0.0)
+            ? g.memoryUsedMiB * 100.0 / g.memoryTotalMiB : lmNaN();
+        bindScaledOrNull(q,":mp",memPct,10.0);
+        bindScaledOrNull(q,":temp",g.temperatureC,10.0); bindScaledOrNull(q,":power",g.powerW,100.0); bindScaledOrNull(q,":freq",g.frequencyMHz,1.0);
         if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
     }
 
@@ -270,30 +211,39 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
     }
 
     // Write per-disk data
-    q.prepare("INSERT OR REPLACE INTO disks_raw VALUES(:ts,:mount,:total,:used)");
+    q.prepare("INSERT OR REPLACE INTO disks_raw VALUES(:ts,:mount,:used_pct)");
     for (const auto &d : m.disks) {
         q.bindValue(":ts", m.timestamp);
         q.bindValue(":mount", d.mountPoint);
-        bindScaledOrNull(q, ":total", d.totalGiB, 100.0);
-        bindScaledOrNull(q, ":used", d.usedGiB, 100.0);
+        bindScaledOrNull(q, ":used_pct", d.usedPct, 10.0);
         if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
     }
 
-    // Persist the top-20 composite ranking (kind 'top'); folding by process
-    // name happens in maintain().
-    q.prepare("INSERT OR REPLACE INTO procs_raw VALUES(:ts,:kind,:rank,:name,:pid,:cpu,:rss)");
-    for (int r = 0; r < m.topProcs.size(); ++r) {
-        const ProcInfo &p = m.topProcs[r];
-        q.bindValue(":ts", m.timestamp);
-        q.bindValue(":kind", QLatin1String("top"));
-        q.bindValue(":rank", r);
+    return db_.commit();
+}
+
+bool MetricsDatabase::mergeProcessDaily(qint64 dayStart, const QVector<ProcDailyAgg> &procs, QString *error) {
+    if (procs.isEmpty()) return true;
+    if (!db_.transaction()) { if (error) *error = db_.lastError().text(); return false; }
+    QSqlQuery q(db_);
+    // Additive upsert: CPU seconds accumulate across drains within the same
+    // day; max_rss keeps the peak. A missing RSS reading binds 0 so the
+    // scalar MAX() never erases an existing peak with NULL.
+    q.prepare(R"(INSERT INTO procs_daily(day,kind,name,cpu_sec,max_rss)
+        VALUES(:day,'daily',:name,:cpu,:rss)
+        ON CONFLICT(day,kind,name) DO UPDATE SET
+            cpu_sec = cpu_sec + excluded.cpu_sec,
+            max_rss = MAX(max_rss, excluded.max_rss))");
+    for (const auto &p : procs) {
+        // A null/empty name would bind as SQL NULL and violate the PK.
+        if (p.name.isNull() || p.name.isEmpty()) continue;
+        q.bindValue(":day", dayStart);
         q.bindValue(":name", p.name);
-        q.bindValue(":pid", static_cast<qlonglong>(p.pid));
-        bindScaledOrNull(q, ":cpu", p.cpuPercent, 10.0);
-        bindScaledOrNull(q, ":rss", p.rssMiB, 1.0);
+        q.bindValue(":cpu", static_cast<qlonglong>(std::llround(p.cpuSec)));
+        const double rss = std::isfinite(p.maxRssMiB) ? p.maxRssMiB : 0.0;
+        q.bindValue(":rss", static_cast<qlonglong>(std::llround(rss)));
         if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
     }
-
     return db_.commit();
 }
 
@@ -306,15 +256,15 @@ bool MetricsDatabase::maintain(qint64 now, const RetentionPolicy &policy, QStrin
     const qint64 openBucket = (now / 300) * 300;
     const QString aggSys5 = QString(R"(
       INSERT OR REPLACE INTO system_5m
-      (ts,cpu_usage,cpu_temp,load1,mem_used,mem_total,swap_used,swap_total,net_rx,net_tx,disk_read,disk_write,disk_used,disk_total,battery_percent,battery_power,battery_health,battery_status,psi_cpu,psi_mem,psi_io,nvme_temp,bat_temp)
-      SELECT (ts/300)*300, CAST(ROUND(AVG(cpu_usage)) AS INTEGER),CAST(ROUND(AVG(cpu_temp)) AS INTEGER),CAST(ROUND(AVG(load1)) AS INTEGER),CAST(ROUND(AVG(mem_used)) AS INTEGER),CAST(ROUND(AVG(mem_total)) AS INTEGER),CAST(ROUND(AVG(swap_used)) AS INTEGER),CAST(ROUND(AVG(swap_total)) AS INTEGER),
-             CAST(ROUND(AVG(net_rx)) AS INTEGER),CAST(ROUND(AVG(net_tx)) AS INTEGER),CAST(ROUND(AVG(disk_read)) AS INTEGER),CAST(ROUND(AVG(disk_write)) AS INTEGER),CAST(ROUND(AVG(disk_used)) AS INTEGER),CAST(ROUND(AVG(disk_total)) AS INTEGER),CAST(ROUND(AVG(battery_percent)) AS INTEGER),CAST(ROUND(AVG(battery_power)) AS INTEGER),CAST(ROUND(AVG(battery_health)) AS INTEGER),MAX(battery_status),
+      (ts,cpu_usage,cpu_temp,load1,mem_pct,swap_pct,net_rx,net_tx,disk_read,disk_write,battery_percent,battery_power,battery_health,battery_status,psi_cpu,psi_mem,psi_io,nvme_temp,bat_temp)
+      SELECT (ts/300)*300, CAST(ROUND(AVG(cpu_usage)) AS INTEGER),CAST(ROUND(AVG(cpu_temp)) AS INTEGER),CAST(ROUND(AVG(load1)) AS INTEGER),CAST(ROUND(AVG(mem_pct)) AS INTEGER),CAST(ROUND(AVG(swap_pct)) AS INTEGER),
+             CAST(ROUND(AVG(net_rx)) AS INTEGER),CAST(ROUND(AVG(net_tx)) AS INTEGER),CAST(ROUND(AVG(disk_read)) AS INTEGER),CAST(ROUND(AVG(disk_write)) AS INTEGER),CAST(ROUND(AVG(battery_percent)) AS INTEGER),CAST(ROUND(AVG(battery_power)) AS INTEGER),CAST(ROUND(AVG(battery_health)) AS INTEGER),MAX(battery_status),
              CAST(ROUND(AVG(psi_cpu)) AS INTEGER),CAST(ROUND(AVG(psi_mem)) AS INTEGER),CAST(ROUND(AVG(psi_io)) AS INTEGER),
              CAST(ROUND(AVG(nvme_temp)) AS INTEGER),CAST(ROUND(AVG(bat_temp)) AS INTEGER)
       FROM system_raw WHERE ts < %1 GROUP BY (ts/300))").arg(openBucket);
     const QString aggGpu5 = QString(R"(
       INSERT OR REPLACE INTO gpu_5m
-      SELECT (ts/300)*300,id,MAX(vendor),MAX(name),MAX(driver),MAX(state),CAST(ROUND(AVG(util)) AS INTEGER),CAST(ROUND(AVG(mem_used)) AS INTEGER),CAST(ROUND(AVG(mem_total)) AS INTEGER),CAST(ROUND(AVG(temp)) AS INTEGER),CAST(ROUND(AVG(power)) AS INTEGER),CAST(ROUND(AVG(freq)) AS INTEGER)
+      SELECT (ts/300)*300,id,MAX(vendor),MAX(name),MAX(driver),MAX(state),CAST(ROUND(AVG(util)) AS INTEGER),CAST(ROUND(AVG(mem_pct)) AS INTEGER),CAST(ROUND(AVG(temp)) AS INTEGER),CAST(ROUND(AVG(power)) AS INTEGER),CAST(ROUND(AVG(freq)) AS INTEGER)
       FROM gpu_raw WHERE ts < %1 GROUP BY (ts/300),id)").arg(openBucket);
     const QString aggCpu5 = QString(R"(
       INSERT OR REPLACE INTO cpu_cores_5m
@@ -322,15 +272,8 @@ bool MetricsDatabase::maintain(qint64 now, const RetentionPolicy &policy, QStrin
       FROM cpu_cores_raw WHERE ts < %1 GROUP BY (ts/300),core)").arg(openBucket);
     const QString aggDisks5 = QString(R"(
       INSERT OR REPLACE INTO disks_5m
-      SELECT (ts/300)*300,mount,CAST(ROUND(AVG(total)) AS INTEGER),CAST(ROUND(AVG(used)) AS INTEGER)
+      SELECT (ts/300)*300,mount,CAST(ROUND(AVG(used_pct)) AS INTEGER)
       FROM disks_raw WHERE ts < %1 GROUP BY (ts/300),mount)").arg(openBucket);
-    // Top-20 rankings fold by process name: average CPU share and peak RSS
-    // survive per bucket, so long ranges can rank processes without keeping
-    // every fine sample.
-    const QString aggProcs5 = QString(R"(
-      INSERT OR REPLACE INTO procs_5m
-      SELECT (ts/300)*300,kind,name,CAST(ROUND(AVG(cpu)) AS INTEGER),CAST(ROUND(MAX(rss)) AS INTEGER)
-      FROM procs_raw WHERE ts < %1 GROUP BY (ts/300),kind,name)").arg(openBucket);
     // Day rollover rule: keep at least `detailDays` calendar days of fine
     // data (today plus the preceding days), at minimum 6 days. Older detail
     // rows were folded into the archive above, so deleting them only clears
@@ -344,22 +287,20 @@ bool MetricsDatabase::maintain(qint64 now, const RetentionPolicy &policy, QStrin
     // rows are kept — that is all a sysfs-only Intel iGPU can report, and the
     // GPU page must stay selectable for it (matches gpuHasSignal above).
     const QString purgeNoSignalGpu =
-        "DELETE FROM gpu_raw WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_used IS NULL AND freq IS NULL";
+        "DELETE FROM gpu_raw WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_pct IS NULL AND freq IS NULL";
     const QString purgeNoSignalGpu5m =
-        "DELETE FROM gpu_5m WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_used IS NULL AND freq IS NULL";
+        "DELETE FROM gpu_5m WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_pct IS NULL AND freq IS NULL";
     const QStringList stmts = {
-        aggSys5, aggGpu5, aggCpu5, aggDisks5, aggProcs5,
+        aggSys5, aggGpu5, aggCpu5, aggDisks5,
         purgeNoSignalGpu, purgeNoSignalGpu5m,
         QString("DELETE FROM system_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM gpu_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM cpu_cores_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM disks_raw WHERE ts < %1").arg(detailCutoff),
-        QString("DELETE FROM procs_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM system_5m WHERE ts < %1").arg(archiveCutoff),
         QString("DELETE FROM gpu_5m WHERE ts < %1").arg(archiveCutoff),
         QString("DELETE FROM cpu_cores_5m WHERE ts < %1").arg(archiveCutoff),
-        QString("DELETE FROM disks_5m WHERE ts < %1").arg(archiveCutoff),
-        QString("DELETE FROM procs_5m WHERE ts < %1").arg(archiveCutoff)
+        QString("DELETE FROM disks_5m WHERE ts < %1").arg(archiveCutoff)
     };
     for (const auto &s : stmts) if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
     // Give space back to the filesystem at most once a day. A failed VACUUM
@@ -402,11 +343,14 @@ QStringList MetricsDatabase::tableColumns(const QString &table) const {
 
 bool MetricsDatabase::migrate(QString *error) {
     QSqlQuery q(db_);
-    if (!q.exec("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version','2')")) {
+    // A brand-new database already has the current layout from execSchema, so
+    // it stamps straight to the latest version and skips the legacy chain.
+    // Existing databases keep their stored version and migrate step by step.
+    if (!q.exec("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version','9')")) {
         if (error) *error = q.lastError().text();
         return false;
     }
-    if (!q.exec("UPDATE metadata SET value='2' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2")) {
+    if (!q.exec("UPDATE metadata SET value='9' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2")) {
         if (error) *error = q.lastError().text();
         return false;
     }
@@ -418,6 +362,126 @@ bool MetricsDatabase::migrate(QString *error) {
     }
     if (schemaVersion() < 6) {
         if (!migrateToV5(error)) { return false; }
+    }
+    if (schemaVersion() < 7) {
+        if (!migrateToV6(error)) { return false; }
+    }
+    if (schemaVersion() < 8) {
+        if (!migrateToV7(error)) { return false; }
+    }
+    if (schemaVersion() < 9) {
+        if (!migrateToV8(error)) { return false; }
+    }
+    return true;
+}
+
+// v5 -> v6 covered PSI/sensor/temperature columns; this step (stamped v7)
+// replaces the per-sample process rankings (procs_raw + procs_5m) with one
+// aggregate row per process and day (procs_daily). Existing 5-minute buckets
+// are folded into daily rows first — avg_cpu is the x10-scaled mean percent
+// over a 300 s bucket, so SUM(avg_cpu) * 0.3 / 10 recovers CPU seconds —
+// then the legacy tables are dropped.
+bool MetricsDatabase::migrateToV6(QString *error) {
+    QSqlQuery q(db_);
+    const QStringList stmts = {
+        "CREATE TABLE IF NOT EXISTS procs_daily (day INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, cpu_sec INTEGER, max_rss INTEGER, PRIMARY KEY(day,kind,name))",
+    };
+    for (const auto &s : stmts) {
+        if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
+    }
+    if (hasTable("procs_5m")) {
+        // Day keys must match the live merge (collector_main's local midnight):
+        // shift sample timestamps into local wall time before flooring, so the
+        // daily boundary is the user's midnight, not UTC's (08:00 in CST).
+        const qint64 off = QDateTime::currentDateTime().offsetFromUtc();
+        const QString backfill = QStringLiteral(
+            "INSERT OR REPLACE INTO procs_daily(day,kind,name,cpu_sec,max_rss) "
+            "SELECT ((ts+%1)/86400)*86400-%1,'daily',name,"
+            "CAST(ROUND(SUM(CAST(avg_cpu AS REAL))*0.3) AS INTEGER),"
+            "CAST(ROUND(MAX(max_rss)) AS INTEGER) "
+            "FROM procs_5m GROUP BY ((ts+%1)/86400)*86400-%1,name").arg(off);
+        if (!q.exec(backfill)) { if (error) *error = q.lastError().text(); return false; }
+    }
+    const QStringList drops = {
+        "DROP TABLE IF EXISTS procs_raw",
+        "DROP TABLE IF EXISTS procs_5m",
+        "UPDATE metadata SET value='7' WHERE key='schema_version'"
+    };
+    for (const auto &s : drops) {
+        if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
+    }
+    return true;
+}
+
+// v6 (stamped v7) -> v8: memory, swap and disk capacities are constants on a
+// booted machine, so storing absolute used/total every sample is waste.
+// system_raw/system_5m replace mem_used/mem_total/swap_used/swap_total with
+// mem_pct/swap_pct (x10-scaled percent), and the disks tables keep only
+// used_pct; the never-written disk_used/disk_total system columns disappear.
+// Historical rows are converted in place: pct = used/total*1000 (same scale
+// on both sides, so the ratio is exact). system_5m predates the sensors
+// column in migrated databases, hence NULL there.
+bool MetricsDatabase::migrateToV7(QString *error) {
+    QSqlQuery q(db_);
+    const QStringList stmts = {
+        "CREATE TABLE system_raw_new (ts INTEGER PRIMARY KEY, cpu_usage INTEGER, cpu_temp INTEGER, load1 INTEGER, mem_pct INTEGER, swap_pct INTEGER, net_rx INTEGER, net_tx INTEGER, disk_read INTEGER, disk_write INTEGER, battery_percent INTEGER, battery_power INTEGER, battery_health INTEGER, battery_status TEXT, psi_cpu INTEGER, psi_mem INTEGER, psi_io INTEGER, sensors TEXT, nvme_temp INTEGER, bat_temp INTEGER)",
+        "INSERT INTO system_raw_new SELECT ts,cpu_usage,cpu_temp,load1,"
+        "CASE WHEN mem_total>0 THEN CAST(ROUND(mem_used*1000.0/mem_total) AS INTEGER) ELSE NULL END,"
+        "CASE WHEN swap_total>0 THEN CAST(ROUND(swap_used*1000.0/swap_total) AS INTEGER) ELSE NULL END,"
+        "net_rx,net_tx,disk_read,disk_write,battery_percent,battery_power,battery_health,battery_status,psi_cpu,psi_mem,psi_io,sensors,nvme_temp,bat_temp FROM system_raw",
+        "DROP TABLE system_raw",
+        "ALTER TABLE system_raw_new RENAME TO system_raw",
+        "CREATE TABLE system_5m_new (ts INTEGER PRIMARY KEY, cpu_usage INTEGER, cpu_temp INTEGER, load1 INTEGER, mem_pct INTEGER, swap_pct INTEGER, net_rx INTEGER, net_tx INTEGER, disk_read INTEGER, disk_write INTEGER, battery_percent INTEGER, battery_power INTEGER, battery_health INTEGER, battery_status TEXT, psi_cpu INTEGER, psi_mem INTEGER, psi_io INTEGER, sensors TEXT, nvme_temp INTEGER, bat_temp INTEGER)",
+        "INSERT INTO system_5m_new SELECT ts,cpu_usage,cpu_temp,load1,"
+        "CASE WHEN mem_total>0 THEN CAST(ROUND(mem_used*1000.0/mem_total) AS INTEGER) ELSE NULL END,"
+        "CASE WHEN swap_total>0 THEN CAST(ROUND(swap_used*1000.0/swap_total) AS INTEGER) ELSE NULL END,"
+        "net_rx,net_tx,disk_read,disk_write,battery_percent,battery_power,battery_health,battery_status,psi_cpu,psi_mem,psi_io,NULL,nvme_temp,bat_temp FROM system_5m",
+        "DROP TABLE system_5m",
+        "ALTER TABLE system_5m_new RENAME TO system_5m",
+        "CREATE TABLE disks_raw_new (ts INTEGER NOT NULL, mount TEXT NOT NULL, used_pct INTEGER, PRIMARY KEY(ts,mount))",
+        "INSERT INTO disks_raw_new SELECT ts,mount,CASE WHEN total>0 THEN CAST(ROUND(used*1000.0/total) AS INTEGER) ELSE NULL END FROM disks_raw",
+        "DROP TABLE disks_raw",
+        "ALTER TABLE disks_raw_new RENAME TO disks_raw",
+        "CREATE TABLE disks_5m_new (ts INTEGER NOT NULL, mount TEXT NOT NULL, used_pct INTEGER, PRIMARY KEY(ts,mount))",
+        "INSERT INTO disks_5m_new SELECT ts,mount,CASE WHEN total>0 THEN CAST(ROUND(used*1000.0/total) AS INTEGER) ELSE NULL END FROM disks_5m",
+        "DROP TABLE disks_5m",
+        "ALTER TABLE disks_5m_new RENAME TO disks_5m",
+        "CREATE INDEX IF NOT EXISTS idx_disks_raw_mount_ts ON disks_raw(mount,ts)",
+        "CREATE INDEX IF NOT EXISTS idx_disks_5m_mount_ts ON disks_5m(mount,ts)",
+        "UPDATE metadata SET value='8' WHERE key='schema_version'"
+    };
+    for (const auto &s : stmts) {
+        if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
+    }
+    return true;
+}
+
+// v8 (stamped v8) -> v9: same reasoning as the memory/disk columns above —
+// VRAM capacity is a constant per device, so gpu_raw/gpu_5m keep only the
+// used percentage (mem_pct, x10-scaled) instead of absolute mem_used/mem_total
+// MiB. Historical rows convert in place: pct = used/total*1000 where a total
+// was ever recorded, NULL otherwise (e.g. Intel shared-memory iGPUs).
+bool MetricsDatabase::migrateToV8(QString *error) {
+    QSqlQuery q(db_);
+    const QStringList stmts = {
+        "CREATE TABLE gpu_raw_new (ts INTEGER NOT NULL, id TEXT NOT NULL, vendor TEXT, name TEXT, driver TEXT, state TEXT, util INTEGER, mem_pct INTEGER, temp INTEGER, power INTEGER, freq INTEGER, PRIMARY KEY(ts,id))",
+        "INSERT INTO gpu_raw_new SELECT ts,id,vendor,name,driver,state,util,"
+        "CASE WHEN mem_total>0 THEN CAST(ROUND(mem_used*1000.0/mem_total) AS INTEGER) ELSE NULL END,"
+        "temp,power,freq FROM gpu_raw",
+        "DROP TABLE gpu_raw",
+        "ALTER TABLE gpu_raw_new RENAME TO gpu_raw",
+        "CREATE TABLE gpu_5m_new (ts INTEGER NOT NULL, id TEXT NOT NULL, vendor TEXT, name TEXT, driver TEXT, state TEXT, util INTEGER, mem_pct INTEGER, temp INTEGER, power INTEGER, freq INTEGER, PRIMARY KEY(ts,id))",
+        "INSERT INTO gpu_5m_new SELECT ts,id,vendor,name,driver,state,util,"
+        "CASE WHEN mem_total>0 THEN CAST(ROUND(mem_used*1000.0/mem_total) AS INTEGER) ELSE NULL END,"
+        "temp,power,freq FROM gpu_5m",
+        "DROP TABLE gpu_5m",
+        "ALTER TABLE gpu_5m_new RENAME TO gpu_5m",
+        "CREATE INDEX IF NOT EXISTS idx_gpu_raw_id_ts ON gpu_raw(id,ts)",
+        "CREATE INDEX IF NOT EXISTS idx_gpu_5m_id_ts ON gpu_5m(id,ts)",
+        "UPDATE metadata SET value='9' WHERE key='schema_version'"
+    };
+    for (const auto &s : stmts) {
+        if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
     }
     return true;
 }
@@ -590,28 +654,36 @@ qint64 MetricsDatabase::earliestTimestamp() const {
 
 std::optional<SystemMetric> MetricsDatabase::latestSystem() const {
     QSqlQuery q(db_);
-    if (!q.exec("SELECT * FROM system_raw ORDER BY ts DESC LIMIT 1") || !q.next()) return std::nullopt;
+    if (!q.exec("SELECT ts,cpu_usage,cpu_temp,load1,mem_pct,swap_pct,net_rx,net_tx,disk_read,disk_write,battery_percent,battery_power,battery_health,nvme_temp,bat_temp FROM system_raw ORDER BY ts DESC LIMIT 1") || !q.next()) return std::nullopt;
     SystemMetric m;
     m.timestamp=q.value(0).toLongLong(); m.cpuUsage=sqlScaled(q.value(1),10.0); m.cpuTemperatureC=sqlScaled(q.value(2),10.0); m.load1=sqlScaled(q.value(3),100.0);
-    m.memoryUsedMiB=sqlScaled(q.value(4),1.0); m.memoryTotalMiB=sqlScaled(q.value(5),1.0); m.swapUsedMiB=sqlScaled(q.value(6),1.0); m.swapTotalMiB=sqlScaled(q.value(7),1.0);
-    m.networkRxMiBs=sqlScaled(q.value(8),1000.0); m.networkTxMiBs=sqlScaled(q.value(9),1000.0); m.diskReadMiBs=sqlScaled(q.value(10),1000.0); m.diskWriteMiBs=sqlScaled(q.value(11),1000.0);
-    m.batteryPercent=sqlScaled(q.value(14),10.0); m.batteryPowerW=sqlScaled(q.value(15),100.0); m.batteryHealthPercent=sqlScaled(q.value(16),10.0); m.batteryStatus=q.value(17).toString();
-    m.psiCpuSome=sqlScaled(q.value(18),100.0); m.psiMemSome=sqlScaled(q.value(19),100.0); m.psiIoSome=sqlScaled(q.value(20),100.0);
-    parseSensorsJson(q.value(21).toString(), m.sensors, m.fans);
-    m.nvmeTemperatureC=sqlScaled(q.value(22),10.0); m.batteryTemperatureC=sqlScaled(q.value(23),10.0);
+    m.memoryUsedPct=sqlScaled(q.value(4),10.0); m.swapUsedPct=sqlScaled(q.value(5),10.0);
+    m.networkRxMiBs=sqlScaled(q.value(6),1000.0); m.networkTxMiBs=sqlScaled(q.value(7),1000.0); m.diskReadMiBs=sqlScaled(q.value(8),1000.0); m.diskWriteMiBs=sqlScaled(q.value(9),1000.0);
+    m.batteryPercent=sqlScaled(q.value(10),10.0); m.batteryPowerW=sqlScaled(q.value(11),100.0); m.batteryHealthPercent=sqlScaled(q.value(12),10.0);
+    m.nvmeTemperatureC=sqlScaled(q.value(13),10.0); m.batteryTemperatureC=sqlScaled(q.value(14),10.0);
+    // Health persists only once per day, so the newest row usually has a NULL
+    // battery_health: fall back to the most recent stored value.
+    if (!std::isfinite(m.batteryHealthPercent)) {
+        QSqlQuery hq(db_);
+        for (const char *table : {"system_raw", "system_5m"}) {
+            if (hq.exec(QStringLiteral("SELECT battery_health FROM %1 WHERE battery_health IS NOT NULL ORDER BY ts DESC LIMIT 1").arg(table)) && hq.next()) {
+                m.batteryHealthPercent = sqlScaled(hq.value(0), 10.0);
+                break;
+            }
+        }
+    }
     // Load every mounted volume recorded at the latest disks_raw timestamp.
     // The GUI overview cards and the Disk page selector are both driven from
     // this list, so a LIMIT 1 here would leave only "/" visible in the UI.
     {
         QSqlQuery dq(db_);
-        if (dq.exec("SELECT mount,total,used FROM disks_raw WHERE ts=(SELECT MAX(ts) FROM disks_raw) ORDER BY mount")) {
+        if (dq.exec("SELECT mount,used_pct FROM disks_raw WHERE ts=(SELECT MAX(ts) FROM disks_raw) ORDER BY mount")) {
             while (dq.next()) {
                 const QString mount = dq.value(0).toString();
                 if (!isUserFacingMount(mount)) continue;
                 DiskInfo d;
                 d.mountPoint = mount;
-                d.totalGiB = sqlScaled(dq.value(1), 100.0);
-                d.usedGiB = sqlScaled(dq.value(2), 100.0);
+                d.usedPct = sqlScaled(dq.value(1), 10.0);
                 m.disks.push_back(d);
             }
         }
@@ -645,27 +717,12 @@ QVector<GpuMetric> MetricsDatabase::latestGpus() const {
     QSqlQuery q(db_);
     // Latest row per device: a transient miss for one GPU on a tick must not
     // hide it while its sibling still reports.
-    if (!q.exec("SELECT id,vendor,name,driver,state,util,mem_used,mem_total,temp,power,freq FROM gpu_raw AS g WHERE ts=(SELECT MAX(ts) FROM gpu_raw WHERE id=g.id) ORDER BY vendor,name")) return out;
+    if (!q.exec("SELECT id,vendor,name,driver,state,util,mem_pct,temp,power,freq FROM gpu_raw AS g WHERE ts=(SELECT MAX(ts) FROM gpu_raw WHERE id=g.id) ORDER BY vendor,name")) return out;
     while (q.next()) {
         GpuMetric g; g.id=q.value(0).toString(); g.vendor=q.value(1).toString(); g.name=q.value(2).toString(); g.driver=q.value(3).toString(); g.state=q.value(4).toString();
-        g.utilization=sqlScaled(q.value(5),10.0); g.memoryUsedMiB=sqlScaled(q.value(6),1.0); g.memoryTotalMiB=sqlScaled(q.value(7),1.0); g.temperatureC=sqlScaled(q.value(8),10.0); g.powerW=sqlScaled(q.value(9),100.0); g.frequencyMHz=sqlScaled(q.value(10),1.0);
+        g.utilization=sqlScaled(q.value(5),10.0); g.memoryUsedPct=sqlScaled(q.value(6),10.0); g.temperatureC=sqlScaled(q.value(7),10.0); g.powerW=sqlScaled(q.value(8),100.0); g.frequencyMHz=sqlScaled(q.value(9),1.0);
         if (!gpuHasSignal(g)) continue; // hide signal-less devices (e.g. an Intel iGPU with no readable sensors)
         out.push_back(g);
-    }
-    return out;
-}
-
-QVector<ProcInfo> MetricsDatabase::latestProcs() const {
-    QVector<ProcInfo> out;
-    QSqlQuery q(db_);
-    if (!q.exec("SELECT rank,name,pid,cpu,rss FROM procs_raw WHERE ts=(SELECT MAX(ts) FROM procs_raw) AND kind='top' ORDER BY rank")) return out;
-    while (q.next()) {
-        ProcInfo p;
-        p.name = q.value(1).toString();
-        p.pid = q.value(2).toLongLong();
-        p.cpuPercent = sqlScaled(q.value(3), 10.0);
-        p.rssMiB = sqlScaled(q.value(4), 1.0);
-        out.push_back(p);
     }
     return out;
 }
@@ -720,26 +777,33 @@ QVector<SystemMetric> MetricsDatabase::systemHistory(qint64 from, qint64 to, int
     const qint64 bucket = std::max<qint64>(1, span / std::max(100,targetPoints));
     const QString table = sourceTable(span);
     QSqlQuery q(db_);
-    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b,AVG(cpu_usage),AVG(cpu_temp),AVG(load1),AVG(mem_used),AVG(mem_total),AVG(swap_used),AVG(swap_total),AVG(net_rx),AVG(net_tx),AVG(disk_read),AVG(disk_write),AVG(battery_percent),AVG(battery_power),AVG(battery_health),AVG(psi_cpu),AVG(psi_mem),AVG(psi_io),AVG(nvme_temp),AVG(bat_temp) FROM %1 WHERE ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
+    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b,AVG(cpu_usage),AVG(cpu_temp),AVG(load1),AVG(mem_pct),AVG(swap_pct),AVG(net_rx),AVG(net_tx),AVG(disk_read),AVG(disk_write),AVG(battery_percent),AVG(battery_power),AVG(battery_health),AVG(psi_cpu),AVG(psi_mem),AVG(psi_io),AVG(nvme_temp),AVG(bat_temp) FROM %1 WHERE ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
     q.bindValue(":bucket",bucket); q.bindValue(":from",from); q.bindValue(":to",to);
     if (!q.exec()) return out;
-    while(q.next()) { SystemMetric m; m.timestamp=q.value(0).toLongLong(); m.cpuUsage=sqlScaled(q.value(1),10.0); m.cpuTemperatureC=sqlScaled(q.value(2),10.0); m.load1=sqlScaled(q.value(3),100.0); m.memoryUsedMiB=sqlScaled(q.value(4),1.0); m.memoryTotalMiB=sqlScaled(q.value(5),1.0); m.swapUsedMiB=sqlScaled(q.value(6),1.0); m.swapTotalMiB=sqlScaled(q.value(7),1.0); m.networkRxMiBs=sqlScaled(q.value(8),1000.0); m.networkTxMiBs=sqlScaled(q.value(9),1000.0); m.diskReadMiBs=sqlScaled(q.value(10),1000.0); m.diskWriteMiBs=sqlScaled(q.value(11),1000.0); m.batteryPercent=sqlScaled(q.value(12),10.0); m.batteryPowerW=sqlScaled(q.value(13),100.0); m.batteryHealthPercent=sqlScaled(q.value(14),10.0); m.psiCpuSome=sqlScaled(q.value(15),100.0); m.psiMemSome=sqlScaled(q.value(16),100.0); m.psiIoSome=sqlScaled(q.value(17),100.0); m.nvmeTemperatureC=sqlScaled(q.value(18),10.0); m.batteryTemperatureC=sqlScaled(q.value(19),10.0); out.push_back(m); }
+    while(q.next()) { SystemMetric m; m.timestamp=q.value(0).toLongLong(); m.cpuUsage=sqlScaled(q.value(1),10.0); m.cpuTemperatureC=sqlScaled(q.value(2),10.0); m.load1=sqlScaled(q.value(3),100.0); m.memoryUsedPct=sqlScaled(q.value(4),10.0); m.swapUsedPct=sqlScaled(q.value(5),10.0); m.networkRxMiBs=sqlScaled(q.value(6),1000.0); m.networkTxMiBs=sqlScaled(q.value(7),1000.0); m.diskReadMiBs=sqlScaled(q.value(8),1000.0); m.diskWriteMiBs=sqlScaled(q.value(9),1000.0); m.batteryPercent=sqlScaled(q.value(10),10.0); m.batteryPowerW=sqlScaled(q.value(11),100.0); m.batteryHealthPercent=sqlScaled(q.value(12),10.0); m.psiCpuSome=sqlScaled(q.value(13),100.0); m.psiMemSome=sqlScaled(q.value(14),100.0); m.psiIoSome=sqlScaled(q.value(15),100.0); m.nvmeTemperatureC=sqlScaled(q.value(16),10.0); m.batteryTemperatureC=sqlScaled(q.value(17),10.0); out.push_back(m); }
+    // Health persists only once per day; carry the last stored value forward
+    // so the health curve reads as a step line instead of mostly gaps.
+    double lastHealth=lmNaN();
+    for (auto &m : out) {
+        if (std::isfinite(m.batteryHealthPercent)) lastHealth=m.batteryHealthPercent;
+        else m.batteryHealthPercent=lastHealth;
+    }
     return out;
 }
 
 QVector<SystemMetric> MetricsDatabase::gpuHistory(const QString &gpuId, qint64 from, qint64 to, int targetPoints) const {
     QVector<SystemMetric> out;
     const qint64 span = std::max<qint64>(1,to-from); const qint64 bucket=std::max<qint64>(1, span/std::max(100,targetPoints)); const QString table=gpuSourceTable(span);
-    QSqlQuery q(db_); q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b,AVG(util),AVG(mem_used),AVG(mem_total),AVG(temp),AVG(power),AVG(freq) FROM %1 WHERE id=:id AND ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
+    QSqlQuery q(db_); q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b,AVG(util),AVG(mem_pct),AVG(temp),AVG(power),AVG(freq) FROM %1 WHERE id=:id AND ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
     q.bindValue(":bucket",bucket); q.bindValue(":id",gpuId); q.bindValue(":from",from); q.bindValue(":to",to); if(!q.exec()) return out;
-    while(q.next()) { SystemMetric m; m.timestamp=q.value(0).toLongLong(); GpuMetric g; g.id=gpuId; g.utilization=sqlScaled(q.value(1),10.0); g.memoryUsedMiB=sqlScaled(q.value(2),1.0); g.memoryTotalMiB=sqlScaled(q.value(3),1.0); g.temperatureC=sqlScaled(q.value(4),10.0); g.powerW=sqlScaled(q.value(5),100.0); g.frequencyMHz=sqlScaled(q.value(6),1.0); m.gpus={g}; out.push_back(m); }
+    while(q.next()) { SystemMetric m; m.timestamp=q.value(0).toLongLong(); GpuMetric g; g.id=gpuId; g.utilization=sqlScaled(q.value(1),10.0); g.memoryUsedPct=sqlScaled(q.value(2),10.0); g.temperatureC=sqlScaled(q.value(3),10.0); g.powerW=sqlScaled(q.value(4),100.0); g.frequencyMHz=sqlScaled(q.value(5),1.0); m.gpus={g}; out.push_back(m); }
     return out;
 }
 
 QStringList MetricsDatabase::gpuIds(bool signalOnly) const {
     QStringList ids; QSqlQuery q(db_);
     const QString where = signalOnly
-        ? " WHERE util IS NOT NULL OR temp IS NOT NULL OR power IS NOT NULL OR mem_used IS NOT NULL OR freq IS NOT NULL"
+        ? " WHERE util IS NOT NULL OR temp IS NOT NULL OR power IS NOT NULL OR mem_pct IS NOT NULL OR freq IS NOT NULL"
         : QString();
     if(q.exec(QString("SELECT DISTINCT id FROM gpu_raw%1 UNION SELECT DISTINCT id FROM gpu_5m%1 ORDER BY id").arg(where)))
         while(q.next()) ids<<q.value(0).toString();
@@ -777,7 +841,7 @@ QVector<DiskInfo> MetricsDatabase::diskHistory(const QString &mountPoint, qint64
     const auto c = AppConfig::load();
     const QString table = span <= static_cast<qint64>(std::max(6, c.detailRetentionDays)) * 86400 ? "disks_raw" : "disks_5m";
     QSqlQuery q(db_);
-    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b, AVG(total), AVG(used) FROM %1 WHERE mount=:mount AND ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
+    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b, AVG(used_pct) FROM %1 WHERE mount=:mount AND ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
     q.bindValue(":bucket", bucket);
     q.bindValue(":mount", mountPoint);
     q.bindValue(":from", from);
@@ -787,8 +851,7 @@ QVector<DiskInfo> MetricsDatabase::diskHistory(const QString &mountPoint, qint64
         DiskInfo d;
         d.timestamp = q.value(0).toLongLong();
         d.mountPoint = mountPoint;
-        d.totalGiB = sqlScaled(q.value(1), 100.0);
-        d.usedGiB = sqlScaled(q.value(2), 100.0);
+        d.usedPct = sqlScaled(q.value(1), 10.0);
         out.push_back(d);
     }
     return out;

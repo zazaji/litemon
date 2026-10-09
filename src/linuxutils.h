@@ -39,4 +39,30 @@ std::optional<qint64> parseProcStatusSwap(const QString &content);
 
 // Live hwmon enumeration (/sys/class/hwmon): temperatures and fan speeds.
 QVector<SensorInfo> readHwmonSensors(QVector<FanInfo> *fans = nullptr);
+
+// Combined battery status ("Charging", "Discharging", ... joined with " + ")
+// across all /sys/class/power_supply batteries; empty when none exists.
+QString readBatteryStatus();
+
+// SwapTotal in MiB from /proc/meminfo; NaN when unavailable.
+double readSwapTotalMiB();
+
+// MemTotal in MiB from /proc/meminfo; NaN when unavailable.
+double readMemTotalMiB();
+
+// MemAvailable in MiB from /proc/meminfo; NaN when unavailable.
+double readMemAvailableMiB();
+
+// OOM kill events from the systemd journal (kernel oom-killer plus
+// systemd-oomd), newest first. days: how far back to scan. Returns {}
+// when the journal is unreadable or has no matching entries.
+QVector<OomInfo> readOomEvents(int days);
+
+// Parsers (unit-tested), one journalctl "-o short-unix" line each:
+//   kernel: "<epoch> <host> kernel: ... Out of memory: Killed process
+//           <pid> (<comm>) ... anon-rss:<n>kB ... UID <uid>"
+std::optional<OomInfo> parseOomKernelLine(const QString &line);
+//   oomd:   "<epoch> <host> systemd-oomd[<pid>]: Killed <cgroup path> due to
+//           memory pressure for <path>"
+std::optional<OomInfo> parseOomOomdLine(const QString &line);
 }

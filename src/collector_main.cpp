@@ -6,6 +6,7 @@
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QDate>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -37,8 +38,8 @@ static QJsonObject toJson(const SystemMetric &m) {
     QJsonObject o {
         {"timestamp", m.timestamp}, {"cpu_usage", jsonNumber(m.cpuUsage)},
         {"cpu_temp", jsonNumber(m.cpuTemperatureC)}, {"load1", jsonNumber(m.load1)},
-        {"memory_used_mib", jsonNumber(m.memoryUsedMiB)}, {"memory_total_mib", jsonNumber(m.memoryTotalMiB)},
-        {"swap_used_mib", jsonNumber(m.swapUsedMiB)}, {"swap_total_mib", jsonNumber(m.swapTotalMiB)},
+        {"memory_used_pct", jsonNumber(m.memoryUsedPct)},
+        {"swap_used_pct", jsonNumber(m.swapUsedPct)},
         {"network_rx_mibs", jsonNumber(m.networkRxMiBs)}, {"network_tx_mibs", jsonNumber(m.networkTxMiBs)},
         {"disk_read_mibs", jsonNumber(m.diskReadMiBs)}, {"disk_write_mibs", jsonNumber(m.diskWriteMiBs)},
         {"battery_percent", jsonNumber(m.batteryPercent)}, {"battery_power_w", jsonNumber(m.batteryPowerW)},
@@ -61,8 +62,8 @@ static QJsonObject toJson(const SystemMetric &m) {
     QJsonArray disks;
     for (const auto &d : m.disks) {
         disks.append(QJsonObject {
-            {"mount_point", d.mountPoint}, {"total_gib", jsonNumber(d.totalGiB)},
-            {"used_gib", jsonNumber(d.usedGiB)}, {"read_mibs", jsonNumber(d.readMiBs)},
+            {"mount_point", d.mountPoint}, {"used_pct", jsonNumber(d.usedPct)},
+            {"read_mibs", jsonNumber(d.readMiBs)},
             {"write_mibs", jsonNumber(d.writeMiBs)}
         });
     }
@@ -174,6 +175,10 @@ int main(int argc, char **argv) {
         if ((now - lastMaintain) >= fileConfig.maintenanceIntervalSec) {
             if (!db.maintain(now, retention, &e)) qWarning("Maintenance: %s", qPrintable(e));
             else if (!db.checkpoint(&e)) qWarning("Checkpoint: %s", qPrintable(e));
+            const qint64 dayStart = QDateTime(QDate::currentDate(), QTime(0, 0)).toSecsSinceEpoch();
+            const auto drained = collector.drainProcessDaily();
+            if (!drained.isEmpty() && !db.mergeProcessDaily(dayStart, drained, &e))
+                qWarning("Process daily: %s", qPrintable(e));
             lastMaintain = now;
         }
     };
