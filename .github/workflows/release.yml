@@ -32,7 +32,7 @@ jobs:
           cd build/release
           cpack -G DEB
           cpack -G TGZ
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-deb
           path: |
@@ -57,7 +57,7 @@ jobs:
         run: ctest --test-dir build/release --output-on-failure
       - name: Package
         run: cd build/release && cpack -G RPM
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-rpm
           path: build/release/*.rpm
