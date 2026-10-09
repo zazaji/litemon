@@ -65,6 +65,8 @@ rm -rf build-win
 cmake -S "$SRC" -B build-win -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE=/opt/litemon-win64-toolchain.cmake \
+  -DQT_HOST_PATH=/usr \
+  -DCMAKE_AUTOMOC_EXECUTABLE=/usr/lib/qt6/libexec/moc \
   -DCMAKE_DISABLE_FIND_PACKAGE_WrapVulkanHeaders=TRUE
 cmake --build build-win -j"$(nproc)"
 for b in litemon.exe litemon-collector.exe; do
@@ -80,7 +82,9 @@ cp build-win/litemon.exe build-win/litemon-collector.exe "$WIN_STAGE/"
 x86_64-w64-mingw32-objdump -p build-win/litemon.exe build-win/litemon-collector.exe \
     | awk '/DLL Name:/ {print $3}' | sort -u \
     | while read -r dll; do
+        [ -f "$QT_WIN/bin/$dll" ] || continue   # skip system DLLs (KERNEL32, ...)
         cp "$QT_WIN/bin/$dll" "$WIN_STAGE/"
+        echo "  + $dll"
     done
 for rt in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
     cp "$QT_WIN/bin/$rt" "$WIN_STAGE/"
