@@ -2,21 +2,75 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+
 permissions:
   contents: write
+
+# macOS/Windows artifacts are cross-compiled on the home113 build host by
+# scripts/release.sh and attached to the same release — see scripts/home113-build.sh
 jobs:
-  debian-package:
+  debian:
+    name: Linux .deb/.tar.gz (amd64)
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
       - uses: actions/checkout@v4
-      - run: apt-get update && apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite dpkg-dev fakeroot file
-      - run: cmake --preset release
-      - run: cmake --build --preset release -j2
-      - run: ctest --test-dir build/release --output-on-failure
-      - run: cd build/release && cpack -G DEB && cpack -G TGZ
-      - uses: softprops/action-gh-release@v2
+      - name: Dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake ninja-build pkg-config \
+            qt6-base-dev libqt6sql6-sqlite dpkg-dev fakeroot file
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release -j2
+      - name: Test
+        run: ctest --test-dir build/release --output-on-failure
+      - name: Package
+        run: |
+          cd build/release
+          cpack -G DEB
+          cpack -G TGZ
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: linux-deb
+          path: |
             build/release/*.deb
             build/release/*.tar.gz
+
+  fedora:
+    name: Linux .rpm (x86_64)
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          dnf install -y gcc-c++ cmake ninja-build pkgconf-pkg-config \
+            qt6-qtbase-devel rpm-build file findutils
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release -j2
+      - name: Test
+        run: ctest --test-dir build/release --output-on-failure
+      - name: Package
+        run: cd build/release && cpack -G RPM
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm
+          path: build/release/*.rpm
+
+  release:
+    needs: [debian, fedora]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

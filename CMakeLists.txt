@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
-project(LiteMon VERSION 2.1.0 LANGUAGES CXX)
+# Version lives in VERSION (single source shared by all platforms).
+# Keep it in sync with the git release tag: vX.Y.Z.
+file(READ "${CMAKE_CURRENT_LIST_DIR}/VERSION" LITEMON_VERSION_RAW)
+string(STRIP "${LITEMON_VERSION_RAW}" LITEMON_VERSION_RAW)
+if(NOT LITEMON_VERSION_RAW MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION file must contain X.Y.Z, got: '${LITEMON_VERSION_RAW}'")
+endif()
+project(LiteMon VERSION "${LITEMON_VERSION_RAW}" LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,7 +27,7 @@ option(LITEMON_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(LITEMON_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(LITEMON_BUILD_TESTS "Build tests" ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Sql)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Sql Network)
 
 add_library(litemon_project_options INTERFACE)
 target_compile_features(litemon_project_options INTERFACE cxx_std_20)
@@ -53,6 +60,16 @@ target_include_directories(litemon_core PUBLIC src)
 target_link_libraries(litemon_core PUBLIC Qt6::Core Qt6::Sql litemon_project_options)
 target_compile_definitions(litemon_core PUBLIC LITEMON_VERSION="${PROJECT_VERSION}")
 
+if(APPLE)
+    # Native sampling sources for macOS builds (also taken by the
+    # CMAKE_SYSTEM_NAME=Darwin cross build, where CMake sets APPLE).
+    target_sources(litemon_core PRIVATE
+        src/macosutils.h src/macosutils.cpp
+        src/collector_mac.cpp
+    )
+    target_link_libraries(litemon_core PUBLIC "-framework IOKit" "-framework CoreFoundation" "-lobjc")
+endif()
+
 add_executable(litemon-collector src/collector_main.cpp)
 target_link_libraries(litemon-collector PRIVATE litemon_core)
 
@@ -64,7 +81,12 @@ add_executable(litemon
     src/settingsdialog.h src/settingsdialog.cpp
     src/mainwindow.h src/mainwindow.cpp
 )
-target_link_libraries(litemon PRIVATE litemon_core Qt6::Gui Qt6::Widgets)
+target_link_libraries(litemon PRIVATE litemon_core Qt6::Gui Qt6::Widgets Qt6::Network)
+if(APPLE)
+    # hideDockIcon talks to NSApplication via the ObjC runtime; AppKit must be
+    # linked so the class exists when objc_getClass looks it up.
+    target_link_libraries(litemon PRIVATE "-framework AppKit")
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS litemon litemon-collector RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -105,5 +127,7 @@ set(CPACK_DEBIAN_PACKAGE_MAINTAINER "LiteMon contributors")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6sql6-sqlite")
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
-set(CPACK_GENERATOR "TGZ;DEB")
+set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
+set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+set(CPACK_GENERATOR "TGZ;DEB;RPM")
 include(CPack)

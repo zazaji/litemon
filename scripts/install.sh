@@ -29,8 +29,12 @@ systemctl --user enable litemon-collector.service
 # collector binary running, and enable --now would keep it.
 systemctl --user restart litemon-collector.service
 
-command -v update-desktop-database >/dev/null && update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1 || true
-command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" >/dev/null 2>&1 || true
+if command -v update-desktop-database >/dev/null; then
+  update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null; then
+  gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" >/dev/null 2>&1 || true
+fi
 
 echo "Installed LiteMon 2.0"
 echo "UI: $PREFIX/bin/litemon"

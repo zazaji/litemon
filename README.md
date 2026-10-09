@@ -203,8 +203,10 @@ sudo dnf install litemon-*.x86_64.rpm
 
 **Windows / macOS (unofficial builds):**
 
-Cross-built on Linux, unsigned (no Apple developer certificate / code signing).
-The Windows bundle is a portable folder — unzip and run `litemon.exe`.
+Cross-built on Linux by `scripts/release.sh` on the home113 build host and
+attached to the same GitHub Release as the Linux packages — every platform in
+a release carries the same version. Unsigned (no Apple developer certificate /
+code signing). The Windows bundle is a portable folder — unzip and run `litemon.exe`.
 The macOS app targets Apple Silicon (arm64) and is unsigned; on first launch,
 right-click the app and choose **Open** to bypass Gatekeeper.
 
@@ -214,9 +216,8 @@ right-click the app and choose **Open** to bypass Gatekeeper.
 ### Build from source
 
 ```bash
-sudo apt install cmake ninja-build qt6-base-dev libqt6charts-dev
-cmake --preset release
-cmake --build --preset release
+sudo apt install build-essential cmake ninja-build qt6-base-dev libqt6sql6-sqlite
+scripts/build.sh release          # bumps VERSION, builds, runs the test suite
 sudo cp build/release/litemon /usr/bin/
 sudo cp build/release/litemon-collector /usr/bin/
 ```
@@ -249,12 +250,13 @@ litemon
 | Platform | GUI | Collector | Status |
 |----------|-----|-----------|--------|
 | Linux (Debian 13) | ✅ | ✅ | Fully supported |
-| macOS | 🔨 | ❌ | GUI compiles; collector needs porting (sysctl/IOKit) |
+| macOS (Apple Silicon) | ✅ | ✅ | Native collector port (sysctl/IOKit), cross-built on Linux |
 | Windows | 🔨 | ❌ | GUI compiles; collector needs porting (WMI/Performance Counters) |
 
-The Qt6 Widgets GUI is cross-platform and compiles on macOS/Windows via GitHub Actions.
-The system collector currently reads Linux-specific interfaces (`/proc`, `/sys`, DRM, `nvidia-smi`).
-Porting the collector to macOS (sysctl, IOKit) and Windows (WMI, PDH) is planned.
+The Qt6 Widgets GUI is cross-platform; macOS/Windows artifacts are cross-compiled
+on Linux and attached to GitHub Releases by `scripts/release.sh`.
+The system collector reads Linux-specific interfaces (`/proc`, `/sys`, DRM, `nvidia-smi`)
+and macOS interfaces (sysctl, IOKit, powermetrics); the Windows collector port (WMI, PDH) is planned.
 
 ## License
 
