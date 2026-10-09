@@ -7,7 +7,7 @@ jobs:
   hygiene:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2   # git diff --check HEAD^ needs the parent commit
       - name: Whitespace and repository hygiene
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: apt-get update && apt-get install -y clang-tidy clang cmake ninja-build pkg-config qt6-base-dev libqt6sql6-sqlite
       - run: CC=clang CXX=clang++ cmake --preset dev
       - run: cmake --build --preset dev -j2   # generate AUTOMOC's mocs_compilation.cpp before tidy

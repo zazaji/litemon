@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dependencies
         run: |
           apt-get update
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     container: fedora:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dependencies
         run: |
           dnf install -y gcc-c++ cmake ninja-build pkgconf-pkg-config \
