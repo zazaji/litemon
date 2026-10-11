@@ -125,19 +125,30 @@ MacBattery readBattery() {
             double maxCap = dictDouble(props, "NominalChargeCapacity");
             if (!(maxCap > 0)) maxCap = dictDouble(props, "MaxCapacity");
             if (design > 0 && maxCap > 0) b.health = maxCap / design * 100.0;
+            const bool external = dictBool(props, "ExternalConnected");
+            const bool charging = dictBool(props, "IsCharging");
+            // Status must not depend on the power keys: the GUI prints
+            // "No battery detected" for an empty status even when percent
+            // and health are present.
+            b.status = charging ? QStringLiteral("Charging")
+                     : external  ? QStringLiteral("AC Attached")
+                                 : QStringLiteral("Discharging");
+            // Instantaneous current moved between keys across macOS releases;
+            // probe the known amperage keys and use the first finite one.
+            double currentMA = std::nan("");
+            for (const char *k : {"InstantAmperage", "Amperage", "AverageAmperage"}) {
+                currentMA = dictDouble(props, k);
+                if (std::isfinite(currentMA) && currentMA != 0) break;
+            }
             const double voltageMV = dictDouble(props, "Voltage");
-            const double currentMA = dictDouble(props, "InstantAmperage");
             if (std::isfinite(voltageMV) && std::isfinite(currentMA)) {
-                const double watts = std::abs(voltageMV * currentMA) / 1e9;
-                const bool external = dictBool(props, "ExternalConnected");
-                const bool charging = dictBool(props, "IsCharging");
+                // mV × mA = µW; /1e6 → W (a /1e9 here made every real reading
+                // 1000× too small and the <0.05 W snap turned it into 0.0).
+                const double watts = std::abs(voltageMV * currentMA) / 1e6;
                 b.powerW = (external && !charging) ? watts : (charging ? watts : -watts);
                 // Discharging at ~0 W would read -0.0 and format as "-0.0 W";
                 // snap near-zero to exact zero so it groups with idle.
                 if (std::abs(b.powerW) < 0.05) b.powerW = 0.0;
-                b.status = charging ? QStringLiteral("Charging")
-                         : external  ? QStringLiteral("AC Attached")
-                                     : QStringLiteral("Discharging");
             }
             const double cur = dictDouble(props, "CurrentCapacity");
             if (std::isfinite(cur)) b.percent = cur;
