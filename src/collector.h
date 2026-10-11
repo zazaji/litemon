@@ -28,6 +28,8 @@ private:
     void collectLoad(SystemMetric &m) const;
     void collectTemperature(SystemMetric &m) const;
     void collectBattery(SystemMetric &m) const;
+    // CPU-package watts from RAPL energy_uj deltas (Linux only).
+    double raplPackagePowerW() const;
     void collectPsi(SystemMetric &m) const;
     void collectSensors(SystemMetric &m) const;
     void collectProcesses(SystemMetric &m) const;
@@ -50,6 +52,10 @@ private:
     // most once per UTC day and reused for every sample in between.
     mutable double cachedHealth_ = lmNaN();
     mutable qint64 lastHealthDay_ = -1;
+    // RAPL package-power fallback for the "battery idle on AC" case: last
+    // energy_uj (µJ) per sysfs path, plus the previous sample's timestamp.
+    mutable QHash<QString, double> lastRaplUj_;
+    mutable qint64 lastRaplMs_ = 0;
     QElapsedTimer rateTimer_;
     GpuCollector gpuCollector_;
 };

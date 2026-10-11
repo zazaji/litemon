@@ -398,7 +398,7 @@ void MainWindow::setupUi(){
     gpuPower_->hide();
 #endif
 gplay->addWidget(gpuPower_,1);stack_->addWidget(gpuPage);
-    auto*bat=makeHistoryPage(&battery_,&batteryPower_);battery_->setTitle("Battery level / health","%");battery_->setFixedYRange(0,110);batteryPower_->setTitle("Battery charge / discharge power","W");
+    auto*bat=makeHistoryPage(&battery_,&batteryPower_);battery_->setTitle("Battery level / health","%");battery_->setFixedYRange(0,110);batteryPower_->setTitle("Battery / AC power","W");
     batteryReadout_=new QLabel(tr("Waiting for collector…"));
     {
         QFont rf=batteryReadout_->font();rf.setPointSizeF(rf.pointSizeF()+2);rf.setBold(true);batteryReadout_->setFont(rf);
@@ -788,8 +788,13 @@ QString MainWindow::batteryReadoutText(const QString &status, const SystemMetric
     QString text = status;
     if (std::isfinite(m.batteryPowerW)) {
         // Collector signs power by battery state: positive = charging, negative = discharging.
-        if (m.batteryPowerW > 0.05) text += tr(" · Charging power %1").arg(fmtPower(m.batteryPowerW));
-        else if (m.batteryPowerW < -0.05) text += tr(" · Discharging power %1").arg(fmtPower(-m.batteryPowerW));
+        // While the battery idles on AC (charge limit reached) the value is a
+        // platform supply estimate, so label it from the actual status tokens.
+        const QStringList tokens = status.split(" + ");
+        if (m.batteryPowerW > 0.05)
+            text += tr(" · %1 %2").arg(tokens.contains("Charging") ? tr("Charging power") : tr("Supply power"), fmtPower(m.batteryPowerW));
+        else if (m.batteryPowerW < -0.05)
+            text += tr(" · %1 %2").arg(tokens.contains("Discharging") ? tr("Discharging power") : tr("Power draw"), fmtPower(-m.batteryPowerW));
         else text += " · " + fmtPower(0.0);
     }
     if (std::isfinite(m.batteryPercent)) text += " · " + fmtPercent(m.batteryPercent);

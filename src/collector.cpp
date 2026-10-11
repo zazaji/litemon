@@ -181,6 +181,7 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
     double pctSum = 0; int pctCount = 0; bool any = false;
     double tempSum = 0; int tempCount = 0;
     QStringList statuses;
+    bool acOnline = false;
     // Health barely changes: read energy_full_design only once per UTC day
     // and serve every sample in between from the cached ratio.
     const qint64 healthDay = QDateTime::currentSecsSinceEpoch() / 86400;
@@ -188,7 +189,16 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
     double energyDesign = 0;
     for (const auto &e : ps.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString base = ps.filePath(e);
-        if (readText(base + "/type").compare("Battery", Qt::CaseInsensitive) != 0) continue;
+        const QString type = readText(base + "/type");
+        if (type.compare("Battery", Qt::CaseInsensitive) != 0) {
+            // External power sources: Mains (barrel/DC) and USB (USB-C PD) both
+            // expose ONLINE=1 while feeding the system.
+            if ((type.compare("Mains", Qt::CaseInsensitive) == 0 || type.compare("USB", Qt::CaseInsensitive) == 0
+                 || type.compare("UPS", Qt::CaseInsensitive) == 0)
+                && readDouble(base + "/online").value_or(0) > 0)
+                acOnline = true;
+            continue;
+        }
         any = true;
         statuses << readText(base + "/status");
         if (auto c = readDouble(base + "/capacity")) { pctSum += *c; ++pctCount; }
@@ -225,9 +235,56 @@ void SystemCollector::collectBattery(SystemMetric &m) const {
     if (std::isfinite(cachedHealth_)) m.batteryHealthPercent = cachedHealth_;
     const bool charging = std::any_of(statuses.cbegin(), statuses.cend(), [](const QString &s){ return s.compare("Charging", Qt::CaseInsensitive) == 0; });
     const bool discharging = std::any_of(statuses.cbegin(), statuses.cend(), [](const QString &s){ return s.compare("Discharging", Qt::CaseInsensitive) == 0; });
-    m.batteryPowerW = (discharging && !charging) ? -power : power;
+    // When the battery idles on external power (full, or held at a charge limit
+    // like ASUS "Long life") it meters zero current, so the system draw is
+    // invisible to it. Fall back to a RAPL package-power estimate so the UI
+    // still shows the supply watts instead of a dead 0 W.
+    double w = power;
+    if (!charging && !discharging && power < 0.05) {
+        const double est = raplPackagePowerW();
+        if (est > 0.05) w = acOnline ? est : -est;
+    }
+    m.batteryPowerW = (discharging && !charging) ? -w : w;
     if (tempCount > 0) m.batteryTemperatureC = tempSum / tempCount;
     m.batteryStatus = statuses.join(" + ");
+}
+
+// CPU-package watts from RAPL energy_uj deltas across samples. Stock kernels
+// guard energy_uj as 0400 root; on machines without it made readable the
+// estimate simply disappears (the caller keeps the battery's own value).
+double SystemCollector::raplPackagePowerW() const {
+    struct Reading { double uj = 0, range = 0; QString path; };
+    QHash<QString, Reading> msr, mmio; // keyed by package name ("package-0")
+    const QDir pc("/sys/class/powercap");
+    for (const auto &e : pc.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString base = pc.filePath(e);
+        if (!readText(base + "/name").startsWith("package-", Qt::CaseInsensitive)) continue;
+        const auto uj = readDouble(base + "/energy_uj");
+        if (!uj) continue; // unreadable (0400 root) or no counter: skip
+        auto &slot = (e.contains("mmio", Qt::CaseInsensitive) ? mmio : msr)[readText(base + "/name")];
+        if (!slot.path.isEmpty()) continue;
+        slot = {*uj, readDouble(base + "/max_energy_range_uj").value_or(0), base};
+    }
+    // MMIO domains mirror the MSR ones; count a package once, preferring MSR.
+    QHash<QString, Reading> chosen = msr;
+    for (auto it = mmio.cbegin(); it != mmio.cend(); ++it)
+        if (!chosen.contains(it.key())) chosen.insert(it.key(), it.value());
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const double dt = lastRaplMs_ > 0 ? (now - lastRaplMs_) / 1000.0 : 0.0;
+    lastRaplMs_ = now;
+    if (chosen.isEmpty() || dt <= 0) return 0;
+    double uj = 0;
+    for (auto it = chosen.cbegin(); it != chosen.cend(); ++it) {
+        const auto prev = lastRaplUj_.constFind(it->path);
+        if (prev != lastRaplUj_.cend()) {
+            double d = it->uj - prev.value();
+            if (d < 0 && it->range > 0) d += it->range; // counter wrapped
+            if (d > 0) uj += d;
+        }
+        lastRaplUj_.insert(it->path, it->uj);
+    }
+    return uj / dt / 1e6; // µJ/s → µW → W
 }
 #endif // __APPLE__
 
