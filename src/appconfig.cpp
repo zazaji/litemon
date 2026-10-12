@@ -165,6 +165,22 @@ bool AppConfig::setAutostartEnabled(bool enable, QString *error) {
     return true;
 }
 
+bool AppConfig::collectorRunning() {
+    const auto env = QProcessEnvironment::systemEnvironment();
+    const QString runtime = env.value("XDG_RUNTIME_DIR");
+    const QString systemctl = QStandardPaths::findExecutable(QStringLiteral("systemctl"));
+    if (systemctl.isEmpty() || runtime.isEmpty()
+        || !QFileInfo::exists(runtime + QStringLiteral("/systemd"))) {
+        return false;
+    }
+    QProcess p;
+    p.start(systemctl, {QStringLiteral("--user"), QStringLiteral("is-active"),
+                        QStringLiteral("litemon-collector.service")});
+    if (!p.waitForFinished(5000)) { return false; }
+    // `systemctl is-active` exits 0 only when the unit is active.
+    return p.exitCode() == 0;
+}
+
 bool AppConfig::setCollectorRunning(bool run, QString *error) {
     const auto env = QProcessEnvironment::systemEnvironment();
     const QString runtime = env.value("XDG_RUNTIME_DIR");

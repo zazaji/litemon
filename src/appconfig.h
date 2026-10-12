@@ -51,5 +51,9 @@ struct AppConfig {
     // data collection). Returns false with a message in *error when no
     // systemd user session is available (e.g. macOS/Windows builds).
     static bool setCollectorRunning(bool run, QString *error);
+    // True only when litemon-collector.service is currently active in the
+    // systemd user session; false when it is stopped or systemd is
+    // unavailable (macOS/Windows builds).
+    static bool collectorRunning();
     static QString autostartFilePath();
 };

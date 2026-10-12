@@ -130,6 +130,9 @@ private:
     QTimer *timer_=nullptr;
     int latestTicks_=0;
     QWidget *collectBanner_=nullptr;
+    // Persistent alarm pinned to the bottom of the left sidebar while the
+    // collector is not running; clicking it resumes collection.
+    QPushButton *collectorAlarm_=nullptr;
     QAction *collectMenuAction_=nullptr;
     QAction *collectTrayAction_=nullptr;
     bool collectionStopped_=false;

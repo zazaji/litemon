@@ -144,6 +144,14 @@ MainWindow::MainWindow(const QString &dbPath, QWidget *parent) : QMainWindow(par
         QSettings s(AppConfig::configPath(), QSettings::IniFormat);
         if (!restoreGeometry(s.value("ui/window_geometry").toByteArray())) resize(1180, 760);
     }
+    // The collector must be running for the GUI to show anything: when the
+    // unit is not active at launch (fresh boot with the unit disabled, a
+    // crash, or a stop that predates this launch), start it here. A pause is
+    // never persisted, so there is no deliberate-pause state to respect.
+    if (hasSystemd_ && !AppConfig::collectorRunning()) {
+        QString err;
+        AppConfig::setCollectorRunning(true, &err); // best effort; the sidebar alarm covers failure
+    }
     timer_=new QTimer(this); connect(timer_,&QTimer::timeout,this,&MainWindow::refreshLatest); timer_->start(2000);
     refreshLatest(); refreshHistory();
 }
@@ -314,6 +322,18 @@ void MainWindow::setupUi(){
     range_=new QComboBox;
     range_->addItem(tr("1 hour"),3600);range_->addItem(tr("6 hours"),21600);range_->addItem(tr("24 hours"),86400);range_->addItem(tr("7 days"),604800);range_->addItem(tr("30 days"),2592000);range_->addItem(tr("1 year"),31536000);range_->setCurrentIndex(2);
     sl->addWidget(range_);
+    // Bottom-of-sidebar alarm for a stopped collector (visible on every page,
+    // unlike the overview banner); clicking resumes via the same path.
+    collectorAlarm_=new QPushButton(tr("⚠ Collector not running"));
+    collectorAlarm_->setCursor(Qt::PointingHandCursor);
+    collectorAlarm_->setToolTip(tr("Click to resume data collection"));
+    collectorAlarm_->setStyleSheet(QStringLiteral(
+        "QPushButton { color: #ffffff; background: #c0392b; border: none;"
+        " border-radius: 8px; padding: 8px 10px; font-weight: 600; }"
+        "QPushButton:hover { background: #a93226; }"));
+    collectorAlarm_->setVisible(false);
+    connect(collectorAlarm_, &QPushButton::clicked, this, &MainWindow::toggleCollection);
+    sl->addWidget(collectorAlarm_);
     root->addWidget(side);
     auto*right=new QWidget;auto*rl=new QVBoxLayout(right);rl->setContentsMargins(14,6,14,8);rl->setSpacing(6);
     stack_=new QStackedWidget;rl->addWidget(stack_,1);root->addWidget(right,1);
@@ -512,6 +532,7 @@ void MainWindow::setCollectionStoppedUi(bool stopped){
     if (collectMenuAction_) collectMenuAction_->setText(text);
     if (collectTrayAction_) collectTrayAction_->setText(text);
     if (collectBanner_) collectBanner_->setVisible(stopped && hasSystemd_);
+    if (collectorAlarm_) collectorAlarm_->setVisible(stopped && hasSystemd_);
 }
 
 void MainWindow::toggleCollection(){
