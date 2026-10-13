@@ -55,9 +55,10 @@ add_library(litemon_core STATIC
     src/collector.h src/collector.cpp
     src/database.h src/database.cpp
     src/diagnostics.h src/diagnostics.cpp
+    src/latencymonitor.h src/latencymonitor.cpp
 )
 target_include_directories(litemon_core PUBLIC src)
-target_link_libraries(litemon_core PUBLIC Qt6::Core Qt6::Sql litemon_project_options)
+target_link_libraries(litemon_core PUBLIC Qt6::Core Qt6::Sql Qt6::Network litemon_project_options)
 target_compile_definitions(litemon_core PUBLIC LITEMON_VERSION="${PROJECT_VERSION}")
 
 if(APPLE)

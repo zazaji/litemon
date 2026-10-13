@@ -45,21 +45,21 @@ int main(int argc, char **argv) {
         ok = false;
     }
 
-    if (!ok) { return 1; }
-    // Per-core CPU: the second sample must report one value per core, each
-    // finite in [0,100] (or NaN for a core with no delta, e.g. hotplug gap).
+    // Per-core utilization: one slot per /proc/stat cpuN line, each finite
+    // (second sample gives every core a tick delta) and within 0..100.
     if (m.cpuCores.isEmpty()) {
         std::fprintf(stderr, "test_collector FAIL: cpuCores is empty\n");
-        return 1;
+        ok = false;
     }
     for (int i = 0; i < m.cpuCores.size(); ++i) {
         const double v = m.cpuCores[i];
-        if (!std::isfinite(v)) continue;
-        if (v < 0.0 || v > 100.0) {
+        if (!std::isfinite(v) || v < 0.0 || v > 100.0) {
             std::fprintf(stderr, "test_collector FAIL: cpuCores[%d]=%f out of range\n", i, v);
-            return 1;
+            ok = false;
         }
     }
+
+    if (!ok) { return 1; }
     std::puts("Collector PASS");
     return 0;
 }

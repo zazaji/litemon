@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
         GpuMetric g; g.id="intel:card0"; g.vendor="Intel"; g.name="Intel GPU"; g.utilization=30+i%10; m.gpus={g};
         if (!db.insert(m, &error)) return 3;
     }
-    if (db.schemaVersion() != 9) return 4;
+    if (db.schemaVersion() != 11) return 4;
     if (!db.integrityCheck(&error)) return 9;
     if (!db.maintain(now, &error)) return 8;
     // v7: procs_daily table exists and the legacy per-sample ranking tables
@@ -121,42 +121,39 @@ int main(int argc, char **argv) {
         const auto hist = db.systemHistory(bucket, bucket + 299);
         if (hist.isEmpty() || std::abs(hist.first().cpuUsage - 50.0) > 0.051) return 31;
     }
-    // v4 per-core CPU: completed buckets fold per (bucket, core) into
-    // cpu_cores_5m as scaled integers; history and latest read them back.
+    // v10 website latency: only successful connects are recorded; completed
+    // buckets fold per (bucket, host) into netping_5m as integer milliseconds
+    // and pingHistory() reads them back per host.
     {
         const qint64 bucket = (now - 7200) / 300 * 300; // completed bucket 2h ago
+        QVector<PingSample> samples;
         for (int i = 0; i < 5; ++i) {
-            SystemMetric m;
-            m.timestamp = bucket + static_cast<qint64>(i) * 60;
-            m.cpuCores = {50.0, 60.0};
-            if (!db.insert(m, &error)) return 40;
+            samples.push_back({bucket + static_cast<qint64>(i) * 60, "baidu.com", 20.0 + i});
+            samples.push_back({bucket + static_cast<qint64>(i) * 60, "apple.com", 150.0});
         }
-        if (!db.maintain(now, &error)) return 41;
-        QSqlDatabase verify = QSqlDatabase::addDatabase("QSQLITE", "test-verify-cores");
+        if (!db.insertPing(samples, &error)) return 40;
+        // Unreachable hosts are simply absent: no failure rows exist anywhere.
+        if (db.pingHosts().contains("google.com")) return 41;
+        if (!db.maintain(now, &error)) return 42;
+        QSqlDatabase verify = QSqlDatabase::addDatabase("QSQLITE", "test-verify-ping");
         verify.setDatabaseName(tmp.filePath("metrics.sqlite"));
-        if (!verify.open()) return 42;
+        if (!verify.open()) return 43;
         QSqlQuery v(verify);
-        if (!v.exec("SELECT COUNT(*) FROM cpu_cores_5m") || !v.next() || v.value(0).toLongLong() == 0) return 43;
-        if (!v.exec("SELECT DISTINCT typeof(util) FROM cpu_cores_5m") || !v.next() || v.value(0).toString() != "integer") return 44;
-        v.prepare("SELECT util FROM cpu_cores_5m WHERE ts=:ts AND core=:core");
-        v.bindValue(":ts", bucket); v.bindValue(":core", 0);
-        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 500) return 45;
-        v.bindValue(":ts", bucket); v.bindValue(":core", 1);
-        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 600) return 46;
+        if (!v.exec("SELECT COUNT(*) FROM netping_5m") || !v.next() || v.value(0).toLongLong() == 0) return 44;
+        if (!v.exec("SELECT DISTINCT typeof(ms) FROM netping_5m") || !v.next() || v.value(0).toString() != "integer") return 45;
+        v.prepare("SELECT ms FROM netping_5m WHERE ts=:ts AND host=:host");
+        v.bindValue(":ts", bucket); v.bindValue(":host", "baidu.com");
+        // AVG(20,21,22,23,24) = 22 -> ROUND -> 22
+        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 22) return 46;
+        v.bindValue(":ts", bucket); v.bindValue(":host", "apple.com");
+        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 150) return 47;
         verify.close();
-        QSqlDatabase::removeDatabase("test-verify-cores");
-        const auto ids = db.cpuCoreIds();
-        if (!ids.contains(0) || !ids.contains(1)) return 47;
-        const auto ch = db.cpuCoreHistory(bucket, bucket + 299);
-        double c0 = lmNaN(), c1 = lmNaN();
-        for (const auto &s : ch) {
-            if (s.core == 0 && !std::isfinite(c0)) c0 = s.utilization;
-            if (s.core == 1 && !std::isfinite(c1)) c1 = s.utilization;
-        }
-        if (std::abs(c0 - 50.0) > 0.051 || std::abs(c1 - 60.0) > 0.051) return 48;
-        const auto latestSys = db.latestSystem();
-        if (!latestSys || latestSys->cpuCores.size() != 2) return 49;
-        if (std::abs(latestSys->cpuCores[0] - 50.0) > 0.051 || std::abs(latestSys->cpuCores[1] - 60.0) > 0.051) return 50;
+        QSqlDatabase::removeDatabase("test-verify-ping");
+        // Sub-detail-retention spans read netping_raw (per-sample values).
+        const auto h = db.pingHistory("baidu.com", bucket, bucket + 299);
+        if (h.isEmpty() || h.first().host != "baidu.com"
+            || std::abs(h.first().ms - 20.0) > 0.01
+            || std::abs(h.last().ms - 24.0) > 0.01) return 48;
     }
     // A GPU with only frequency (e.g. Intel iGPU with no hwmon sensors) IS
     // considered signal-bearing — frequency alone is meaningful data.
@@ -293,6 +290,74 @@ int main(int argc, char **argv) {
         const auto withBattery = db.latestSystem();
         if (!withBattery || !std::isfinite(withBattery->batteryHealthPercent)
             || std::abs(withBattery->batteryHealthPercent - 96.5) > 0.06) return 97;
+    }
+    // v11 per-core CPU, today-only: rows land in cpu_cores_raw as scaled
+    // integers (there is no 5-minute archive for this domain), rows from
+    // before local midnight are purged by maintain(), and cpuCoreHistory()
+    // never returns anything older than today even when asked for more.
+    {
+        const qint64 dayStart = QDateTime(QDate::currentDate(), QTime(0, 0)).toSecsSinceEpoch();
+        const qint64 todayTs = dayStart + 3600;     // guaranteed inside today
+        const qint64 yesterdayTs = dayStart - 3600; // yesterday: discarded
+        for (int i = 0; i < 5; ++i) {
+            SystemMetric m;
+            m.timestamp = todayTs + static_cast<qint64>(i) * 60;
+            m.cpuCores = {50.0 + i, 60.0};
+            if (!db.insert(m, &error)) return 100;
+        }
+        // A NaN core slot (offline/absent core) writes nothing.
+        SystemMetric gap;
+        gap.timestamp = todayTs + 400;
+        gap.cpuCores = {55.0, lmNaN()};
+        if (!db.insert(gap, &error)) return 101;
+        // Newest per-core sample carries both cores again, so latestSystem()
+        // sees the full vector.
+        SystemMetric fin;
+        fin.timestamp = todayTs + 500;
+        fin.cpuCores = {56.0, 61.0};
+        if (!db.insert(fin, &error)) return 101;
+        // Yesterday's row exists only to prove the midnight purge.
+        SystemMetric old;
+        old.timestamp = yesterdayTs;
+        old.cpuCores = {99.0};
+        if (!db.insert(old, &error)) return 102;
+        if (!db.maintain(now, &error)) return 103;
+        QSqlDatabase verify = QSqlDatabase::addDatabase("QSQLITE", "test-verify-cores");
+        verify.setDatabaseName(tmp.filePath("metrics.sqlite"));
+        if (!verify.open()) return 104;
+        QSqlQuery v(verify);
+        if (v.exec("SELECT 1 FROM cpu_cores_5m")) return 105; // no archive domain
+        if (!v.exec("SELECT COUNT(*) FROM cpu_cores_raw") || !v.next()) return 106;
+        // 5 today samples x 2 cores + gap x 1 core + fin x 2 cores = 13;
+        // yesterday purged.
+        if (v.value(0).toLongLong() != 13) return 107;
+        if (!v.exec("SELECT DISTINCT typeof(util) FROM cpu_cores_raw") || !v.next()
+            || v.value(0).toString() != "integer") return 108;
+        v.prepare("SELECT util FROM cpu_cores_raw WHERE ts=:ts AND core=:core");
+        v.bindValue(":ts", todayTs); v.bindValue(":core", 0);
+        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 500) return 109;
+        v.prepare("SELECT COUNT(*) FROM cpu_cores_raw WHERE core=:core");
+        v.bindValue(":core", 1);
+        // 5 two-core samples + fin; the gap's NaN slot skipped core 1.
+        if (!v.exec() || !v.next() || v.value(0).toLongLong() != 6) return 110;
+        verify.close();
+        QSqlDatabase::removeDatabase("test-verify-cores");
+        const auto ids = db.cpuCoreIds();
+        if (!ids.contains(0) || !ids.contains(1) || ids.size() != 2) return 112;
+        const auto ch = db.cpuCoreHistory(yesterdayTs, dayStart + 7200);
+        if (ch.isEmpty()) return 113;
+        for (const auto &s : ch) {
+            if (s.timestamp < dayStart) return 114; // never surfaces yesterday
+        }
+        double c1 = lmNaN();
+        for (const auto &s : ch) {
+            if (s.core == 1 && !std::isfinite(c1)) c1 = s.utilization;
+        }
+        if (std::abs(c1 - 60.0) > 0.051) return 115;
+        const auto latestSys = db.latestSystem();
+        if (!latestSys || latestSys->cpuCores.size() != 2) return 116;
+        if (std::abs(latestSys->cpuCores[0] - 56.0) > 0.051) return 117; // fin sample is newest
+        if (std::abs(latestSys->cpuCores[1] - 61.0) > 0.051) return 118;
     }
     std::puts("Database PASS");
     return 0;

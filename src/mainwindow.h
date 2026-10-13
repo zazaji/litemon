@@ -45,13 +45,13 @@ private:
     struct Card { QLabel *value=nullptr; QLabel *detail=nullptr; QWidget *frame=nullptr; };
     Card makeCard(const QString &title, QGridLayout *grid, int row, int col, int minHeight = 120);
     QWidget *makeHistoryPage(ChartWidget **a, ChartWidget **b);
-    void refreshCpuCoreCharts(qint64 from, qint64 to);
     void refreshSensors();
     void refreshProcesses();
     void refreshOom();
     void refreshMemoryTrees();
     QVector<ProcInfo> sampleProcesses();
     QString sensorStateText(double tempC) const;
+    void refreshCpuCoreCharts(qint64 from, qint64 to);
     QString psiLevelText(double psi) const;
     qint64 selectedSpanSeconds() const;
     void setupUi();
@@ -106,7 +106,13 @@ private:
     QWidget *diskCardsContainer_=nullptr;
     QGridLayout *diskCardsLayout_=nullptr;
 
-    ChartWidget *cpuUsage_=nullptr,*cpuTemp_=nullptr,*mem_=nullptr,*swap_=nullptr,*net_=nullptr,*diskIo_=nullptr,*diskUsage_=nullptr,*battery_=nullptr,*batteryPower_=nullptr,*batteryTemp_=nullptr,*diskTemp_=nullptr,*diskIoPage_=nullptr,*gpuUsage_=nullptr,*gpuAux_=nullptr,*gpuPower_=nullptr;
+    ChartWidget *cpuUsage_=nullptr,*cpuTemp_=nullptr,*mem_=nullptr,*swap_=nullptr,*net_=nullptr,*netLatency_=nullptr,*diskUsage_=nullptr,*battery_=nullptr,*batteryPower_=nullptr,*batteryTemp_=nullptr,*diskTemp_=nullptr,*diskIoPage_=nullptr,*gpuUsage_=nullptr,*gpuAux_=nullptr,*gpuPower_=nullptr;
+    // Per-core CPU grid (today-only data, four charts per row).
+    QLabel *cpuCoresLabel_=nullptr;
+    QScrollArea *cpuCoresScroll_=nullptr;
+    QGridLayout *cpuCoresLayout_=nullptr;
+    QVector<ChartWidget*> cpuCoreCharts_;
+    QVector<int> cpuCoreIds_;
     QVector<FanInfo> liveFans_;
     QWidget *sensorsScroll_=nullptr;
     QGridLayout *sensorsGrid_=nullptr;
@@ -122,11 +128,6 @@ private:
     TreemapWidget *swapTree_=nullptr;
     QWidget *memPage_=nullptr;
     QComboBox *diskSelector_=nullptr;
-    QLabel *cpuCoresLabel_=nullptr;
-    QScrollArea *cpuCoresScroll_=nullptr;
-    QGridLayout *cpuCoresLayout_=nullptr;
-    QVector<ChartWidget*> cpuCoreCharts_;
-    QVector<int> cpuCoreIds_;
     QTimer *timer_=nullptr;
     int latestTicks_=0;
     QWidget *collectBanner_=nullptr;

@@ -85,7 +85,9 @@ struct SystemMetric {
     double cpuTemperatureC = lmNaN();
     double load1 = lmNaN();
     // Per-core utilization, indexed by Linux core id (cpu0 -> [0]); NaN when
-    // a core reported no delta (e.g. offline between samples).
+    // a core reported no delta (e.g. offline between samples). Stored for
+    // today only (cpu_cores_raw is purged past local midnight), so the
+    // per-core curves never accumulate into long-term history.
     QVector<double> cpuCores;
     // RAM/swap usage in percent (used/capacity*100). Totals never change on a
     // booted machine, so only the percentage is persisted; the GUI reads the
@@ -117,6 +119,16 @@ struct SystemMetric {
     // long-term per-process history lives in procs_daily instead.
     QVector<ProcInfo> topProcs;
     QVector<GpuMetric> gpus;
+};
+
+// One website-latency sample (netping domain): HTTP round-trip time in ms
+// (DNS + connect + HEAD request + first response byte, default port 80).
+// Only hosts that actually respond are recorded; a failure or timeout writes
+// nothing, so the latency chart shows a gap (red band) for unreachable hosts.
+struct PingSample {
+    qint64 timestamp = 0;
+    QString host;
+    double ms = lmNaN();
 };
 
 // One per-core sample returned by MetricsDatabase::cpuCoreHistory().

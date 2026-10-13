@@ -25,14 +25,21 @@ public:
     std::optional<SystemMetric> latestSystem() const;
     QVector<GpuMetric> latestGpus() const;
     QVector<SystemMetric> systemHistory(qint64 from, qint64 to, int targetPoints = 900) const;
-    QVector<BandPoint> systemHistoryBands(qint64 from, qint64 to, int numBands = 100) const;
     QVector<SystemMetric> gpuHistory(const QString &gpuId, qint64 from, qint64 to, int targetPoints = 900) const;
+    // Per-core CPU domain: today-only detail (cpu_cores_raw holds the current
+    // calendar day's fine samples; maintain() discards older rows and there
+    // is no 5-minute archive for this domain).
     QVector<int> cpuCoreIds() const;
     QVector<CpuCoreSample> cpuCoreHistory(qint64 from, qint64 to, int targetPoints = 900) const;
     QStringList gpuIds(bool signalOnly = false) const;
     QString gpuName(const QString &id) const;
     QStringList diskMountPoints() const;
     QVector<DiskInfo> diskHistory(const QString &mountPoint, qint64 from, qint64 to, int targetPoints = 900) const;
+    // Website latency domain (netping): insert successful-connect samples,
+    // list the hosts seen so far, and read one host's history as ms.
+    bool insertPing(const QVector<PingSample> &samples, QString *error = nullptr);
+    QStringList pingHosts() const;
+    QVector<PingSample> pingHistory(const QString &host, qint64 from, qint64 to, int targetPoints = 900) const;
     QString path() const { return path_; }
     int schemaVersion() const;
     bool integrityCheck(QString *error = nullptr) const;
@@ -42,7 +49,7 @@ public:
 private:
     QString sourceTable(qint64 span) const;
     QString gpuSourceTable(qint64 span) const;
-    QString cpuSourceTable(qint64 span) const;
+    QString pingSourceTable(qint64 span) const;
     bool execSchema(QString *error);
     bool migrate(QString *error);
     bool migrateToV3(QString *error);
@@ -51,6 +58,8 @@ private:
     bool migrateToV6(QString *error);
     bool migrateToV7(QString *error);
     bool migrateToV8(QString *error);
+    bool migrateToV10(QString *error);
+    bool migrateToV11(QString *error);
     bool hasTable(const QString &name) const;
     QStringList tableColumns(const QString &table) const;
     static void bindScaledOrNull(QSqlQuery &q, const QString &name, double value, double scale);

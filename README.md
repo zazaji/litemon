@@ -1,15 +1,17 @@
 # LiteMon 2.0
 
-[![CI](https://github.com/user/litemon/actions/workflows/ci.yml/badge.svg)](https://github.com/user/litemon/actions/workflows/ci.yml)
+[![CI](https://github.com/zazaji/litemon/actions/workflows/ci.yml/badge.svg)](https://github.com/zazaji/litemon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 LiteMon is a lightweight, **single-machine**, local-first historical monitor for Linux desktops. It is designed for users who want useful long-term CPU/GPU/memory/network/storage/battery history without running Prometheus, Grafana, containers, a web server, or a remote service.
 
 ![LiteMon Overview](docs/screenshot.png)
 
-| CPU history | GPU history with click-to-pin crosshair |
+| CPU history | GPU history (NVIDIA) |
 |---|---|
 | ![CPU history](docs/screenshot-cpu.png) | ![GPU history](docs/screenshot-gpu.png) |
+| **Network throughput + website latency** | **Two-column settings** |
+| ![Network history](docs/screenshot-network.png) | ![Settings](docs/screenshot-settings.png) |
 
 ## Highlights
 
@@ -18,6 +20,7 @@ LiteMon is a lightweight, **single-machine**, local-first historical monitor for
 - Small `litemon-collector` background process; GUI runs only when opened.
 - SQLite WAL database with bounded retention and downsampling.
 - CPU, load, temperature, memory, swap, network throughput, disk throughput and root filesystem usage.
+- **Website latency** (opt-in): periodic HTTP round-trip probes (DNS + connect + `HEAD` request + first response byte) of up to 5 configurable hosts, `host:port` syntax supported (default baidu.com / google.com / apple.com); probing runs on a dedicated thread and only hosts that actually respond are recorded, so an unreachable host shows as a gap instead of a fake value.
 - Laptop battery level, state, charge/discharge power and health.
 - **NVIDIA** GPU utilization, VRAM, temperature, power and graphics clock via `nvidia-smi`.
 - **Intel** GPU support through DRM/sysfs, `xpu-smi` for Xe/Arc where available, and `intel_gpu_top -J` fallback.
@@ -43,7 +46,7 @@ LiteMon is a lightweight, **single-machine**, local-first historical monitor for
  always-on, low priority       open only when needed
 ```
 
-The collector defaults to a 5-second system interval and 10-second GPU interval. Retention defaults are:
+The collector samples at a configurable interval (60-second minimum, 60-second default for both system and GPU metrics) and stores only the essentials: averaged CPU and per-device GPU percentages. Per-core CPU curves are kept for today only — no aggregation, rows are discarded at local midnight. Retention defaults are:
 
 - fine detail: last 7 calendar days (minimum 6)
 - compressed 5-minute averages: 365 days
@@ -189,12 +192,12 @@ sudo dnf makecache && sudo dnf install litemon
 
 ```bash
 # Debian / Ubuntu (amd64, arm64)
-wget https://github.com/zazaji/litemon/releases/latest/download/litemon_2.1.0_amd64.deb
-sudo dpkg -i litemon_2.1.0_amd64.deb
+wget https://github.com/zazaji/litemon/releases/latest/download/litemon_2.1.6_amd64.deb
+sudo dpkg -i litemon_2.1.6_amd64.deb
 sudo apt-get install -f   # fix any missing dependencies
 
 # Fedora / Rocky / AlmaLinux / RHEL
-wget https://github.com/litemon/litemon/releases/latest/download/litemon-*.x86_64.rpm
+wget https://github.com/zazaji/litemon/releases/latest/download/litemon-*.x86_64.rpm
 sudo dnf install litemon-*.x86_64.rpm
 ```
 

@@ -3,6 +3,7 @@
 #include "collector.h"
 #include "database.h"
 #include "diagnostics.h"
+#include "latencymonitor.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -163,6 +164,34 @@ int main(int argc, char **argv) {
     qint64 lastGpu = 0;
     qint64 lastMaintain = 0;
     collector.collect(false);
+
+    // Website-latency probing (opt-in). It runs on its own thread so a slow
+    // metric tick (nvidia-smi subprocess, disk sampling) can never delay its
+    // socket notifications — on one thread every host's measured latency
+    // degenerates to "how long the sampling loop was blocked" and all hosts
+    // report the same fake value. Only successful connects are written to the
+    // netping tables. Declared at function scope: they must outlive the
+    // app.exec() event loop below.
+    QThread latencyThread;
+    LatencyMonitor latency;
+    if (fileConfig.netLatencyEnabled && !fileConfig.netLatencyHosts.isEmpty()) {
+        latency.setHosts(fileConfig.netLatencyHosts);
+        latency.moveToThread(&latencyThread);
+        QObject::connect(&latencyThread, &QThread::started, &latency,
+                         [&latency, interval] { latency.start(interval * 1000); });
+        QObject::connect(&latency, &LatencyMonitor::finished, &app,
+                         [&](const QVector<PingSample> &samples) {
+                             if (samples.isEmpty()) return;
+                             QString pe;
+                             if (!db.insertPing(samples, &pe)) qWarning("Ping insert: %s", qPrintable(pe));
+                         });
+        QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&latency, &latencyThread] {
+            QMetaObject::invokeMethod(&latency, &LatencyMonitor::stopNow, Qt::QueuedConnection);
+            latencyThread.quit();
+            latencyThread.wait();
+        });
+        latencyThread.start();
+    }
 
     auto tick = [&] {
         const qint64 now = QDateTime::currentSecsSinceEpoch();

@@ -1,11 +1,12 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 struct AppConfig {
     // Minimum sampling cadence is 60 seconds: finer sampling multiplies
-    // database growth (per-core rows scale with core count) while adding no
-    // useful signal to minute-scale history charts.
+    // database growth while adding no useful signal to minute-scale history
+    // charts.
     int sampleIntervalSec = 60;
     int gpuIntervalSec = 60;
     // Fine-grained detail rows: calendar days kept (minimum 6).
@@ -38,6 +39,11 @@ struct AppConfig {
     // Launch the GUI automatically at login (systemd user units when
     // available, XDG autostart entry otherwise).
     bool autostart = false;
+    // Website-latency probing on the Network page (opt-in). Hosts are plain
+    // hostnames (port 443 implied); at most 5 are kept, blanks dropped,
+    // duplicates removed. Only successful connects are recorded.
+    bool netLatencyEnabled = false;
+    QStringList netLatencyHosts = {"baidu.com", "google.com", "apple.com"};
 
     static AppConfig load();
     void save() const;

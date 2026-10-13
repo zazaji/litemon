@@ -15,12 +15,12 @@
 #include <cmath>
 #include <algorithm>
 
-// Storage format (schema v8): SQLite has no float16 type — REAL always costs
+// Storage format (schema v11): SQLite has no float16 type — REAL always costs
 // 8 bytes — so low-precision metrics are stored as scaled INTEGERs
 // (fixed-point). SQLite packs small integers in 1-3 bytes, roughly 3-4x
 // smaller than REALs, with precision matched to display needs:
 //
-//   percent (cpu, per-core, battery)  x10    (0.1%)
+//   percent (cpu, battery) ........... x10    (0.1%)
 //   temperature ............... x10    (0.1 C)
 //   load1 ..................... x100
 //   memory/swap/disk usage .... x10    (0.1%) — capacities are constant, so
@@ -31,8 +31,17 @@
 //   rates (MiB/s) ............. x1000  (0.001 MiB/s)
 //   power (W) ................. x100   (0.01 W)
 //   frequency (MHz) ........... x1
+//   latency (ms) .............. x1     (integer milliseconds; failures are
+//                                       not recorded at all)
 // NULL still means unknown; in-memory model stays double, scaling happens
 // only at the database boundary (insert: x scale, read: / scale).
+//
+// Per-core CPU (v11) is a deliberate exception to the two-tables-per-domain
+// layout: one raw table only, holding the current calendar day's samples.
+// There is no cpu_cores archive — maintain() deletes everything older than
+// local midnight, and cpuCoreHistory() clamps its window to today, so the
+// per-core curves can never grow into multi-day history again (that growth
+// is what schema v10 removed the domain for).
 
 MetricsDatabase::MetricsDatabase(const QString &path, const QString &connectionName)
     : path_(path), connectionName_(connectionName.isEmpty() ? "litemon-" + QUuid::createUuid().toString(QUuid::WithoutBraces) : connectionName) {}
@@ -61,11 +70,11 @@ bool MetricsDatabase::open(QString *error) {
 }
 
 bool MetricsDatabase::execSchema(QString *error) {
-    // v8 layout: two tables per domain. *_raw holds fine samples for the last
+    // v10 layout: two tables per domain. *_raw holds fine samples for the last
     // `detailDays` calendar days; *_5m holds compressed 5-minute averages for
     // the long-term archive. All metric columns are scaled INTEGERs (see top).
-    // Per-core CPU utilization lives in its own domain (cpu_cores_*) because
-    // the core count varies per machine.
+    // GPU identity (vendor/name/driver) is per-device constant data and lives
+    // once in gpu_meta instead of on every sample row.
     const QString systemCols = R"(
         ts INTEGER PRIMARY KEY,
         cpu_usage INTEGER, cpu_temp INTEGER, load1 INTEGER,
@@ -76,35 +85,44 @@ bool MetricsDatabase::execSchema(QString *error) {
         nvme_temp INTEGER, bat_temp INTEGER
     )";
     const QString gpuCols = R"(
-        ts INTEGER NOT NULL, id TEXT NOT NULL, vendor TEXT, name TEXT, driver TEXT, state TEXT,
+        ts INTEGER NOT NULL, id TEXT NOT NULL, state TEXT,
         util INTEGER, mem_pct INTEGER, temp INTEGER, power INTEGER, freq INTEGER,
         PRIMARY KEY(ts,id)
-    )";
-    const QString cpuCoreCols = R"(
-        ts INTEGER NOT NULL, core INTEGER NOT NULL, util INTEGER,
-        PRIMARY KEY(ts,core)
     )";
     const QString diskCols = R"(
         ts INTEGER NOT NULL, mount TEXT NOT NULL, used_pct INTEGER,
         PRIMARY KEY(ts,mount)
+    )";
+    const QString netpingCols = R"(
+        ts INTEGER NOT NULL, host TEXT NOT NULL, ms INTEGER,
+        PRIMARY KEY(ts,host)
+    )";
+    // Per-core CPU: today-only detail (see header comment). Single table, no
+    // 5-minute archive sibling.
+    const QString cpuCoreCols = R"(
+        ts INTEGER NOT NULL, core INTEGER NOT NULL, util INTEGER,
+        PRIMARY KEY(ts,core)
     )";
     QSqlQuery q(db_);
     const QStringList stmts = {
         "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS system_raw (" + systemCols + ")",
         "CREATE TABLE IF NOT EXISTS system_5m (" + systemCols + ")",
+        "CREATE TABLE IF NOT EXISTS cpu_cores_raw (" + cpuCoreCols + ")",
         "CREATE TABLE IF NOT EXISTS gpu_raw (" + gpuCols + ")",
         "CREATE TABLE IF NOT EXISTS gpu_5m (" + gpuCols + ")",
-        "CREATE TABLE IF NOT EXISTS cpu_cores_raw (" + cpuCoreCols + ")",
-        "CREATE TABLE IF NOT EXISTS cpu_cores_5m (" + cpuCoreCols + ")",
+        "CREATE TABLE IF NOT EXISTS gpu_meta (id TEXT PRIMARY KEY, vendor TEXT, name TEXT, driver TEXT)",
+        "CREATE TABLE IF NOT EXISTS netping_raw (" + netpingCols + ")",
+        "CREATE TABLE IF NOT EXISTS netping_5m (" + netpingCols + ")",
         "CREATE TABLE IF NOT EXISTS disks_raw (" + diskCols + ")",
         "CREATE TABLE IF NOT EXISTS disks_5m (" + diskCols + ")",
-        // Per-process daily aggregates (introduced in v7); part of the v8 layout.
+        // Per-process daily aggregates (introduced in v7).
         "CREATE TABLE IF NOT EXISTS procs_daily (day INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, cpu_sec INTEGER, max_rss INTEGER, PRIMARY KEY(day,kind,name))",
         "CREATE INDEX IF NOT EXISTS idx_gpu_raw_id_ts ON gpu_raw(id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_gpu_5m_id_ts ON gpu_5m(id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_cpu_cores_raw_core_ts ON cpu_cores_raw(core,ts)",
-        "CREATE INDEX IF NOT EXISTS idx_cpu_cores_5m_core_ts ON cpu_cores_5m(core,ts)",
+        "CREATE INDEX IF NOT EXISTS idx_netping_raw_host_ts ON netping_raw(host,ts)",
+        "CREATE INDEX IF NOT EXISTS idx_netping_5m_host_ts ON netping_5m(host,ts)",
         "CREATE INDEX IF NOT EXISTS idx_disks_raw_mount_ts ON disks_raw(mount,ts)",
         "CREATE INDEX IF NOT EXISTS idx_disks_5m_mount_ts ON disks_5m(mount,ts)"
     };
@@ -160,9 +178,9 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
             m.batteryPercent, m.batteryPowerW, m.batteryHealthPercent,
             m.nvmeTemperatureC, m.batteryTemperatureC};
         for (double v : vals) { if (std::isfinite(v)) return false; }
+        for (double v : m.cpuCores) { if (std::isfinite(v)) return false; }
         if (!gpus.isEmpty()) return false;
         if (!m.disks.isEmpty()) return false;
-        for (double v : m.cpuCores) { if (std::isfinite(v)) return false; }
         return true;
     };
     if (sysEmpty()) return true;
@@ -189,9 +207,37 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
     bindScaledOrNull(q,":nt",m.nvmeTemperatureC,10.0); bindScaledOrNull(q,":bt",m.batteryTemperatureC,10.0);
     if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
 
-    q.prepare(R"(INSERT OR REPLACE INTO gpu_raw VALUES(:ts,:id,:vendor,:name,:driver,:state,:u,:mp,:temp,:power,:freq))");
+    // Per-core utilization: today-only detail, written to cpu_cores_raw as
+    // scaled integers. maintain() discards rows past local midnight and there
+    // is no 5-minute archive for this domain.
+    q.prepare("INSERT OR REPLACE INTO cpu_cores_raw(ts,core,util) VALUES(:ts,:core,:u)");
+    for (int i = 0; i < m.cpuCores.size(); ++i) {
+        const double v = m.cpuCores.at(i);
+        if (!std::isfinite(v)) continue; // offline/absent core slot
+        q.bindValue(":ts", m.timestamp);
+        q.bindValue(":core", i);
+        bindScaledOrNull(q, ":u", v, 10.0);
+        if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
+    }
+
+    // go to gpu_meta (upserted, existing non-empty values win) so the sample
+    // rows stay narrow. CASE guards keep an empty reading from erasing a
+    // previously stored name.
+    q.prepare(R"(INSERT OR REPLACE INTO gpu_raw VALUES(:ts,:id,:state,:u,:mp,:temp,:power,:freq))");
     for (const auto &g : gpus) {
-        q.bindValue(":ts",m.timestamp); q.bindValue(":id",g.id); q.bindValue(":vendor",g.vendor); q.bindValue(":name",g.name); q.bindValue(":driver",g.driver); q.bindValue(":state",g.state);
+        QSqlQuery meta(db_);
+        meta.prepare(R"(INSERT INTO gpu_meta(id,vendor,name,driver) VALUES(:id,:vendor,:name,:driver)
+            ON CONFLICT(id) DO UPDATE SET
+                vendor = CASE WHEN excluded.vendor != '' THEN excluded.vendor ELSE gpu_meta.vendor END,
+                name = CASE WHEN excluded.name != '' THEN excluded.name ELSE gpu_meta.name END,
+                driver = CASE WHEN excluded.driver != '' THEN excluded.driver ELSE gpu_meta.driver END)");
+        meta.bindValue(":id", g.id);
+        meta.bindValue(":vendor", g.vendor);
+        meta.bindValue(":name", g.name);
+        meta.bindValue(":driver", g.driver);
+        if (!meta.exec()) { db_.rollback(); if (error) *error = meta.lastError().text(); return false; }
+
+        q.bindValue(":ts",m.timestamp); q.bindValue(":id",g.id); q.bindValue(":state",g.state);
         bindScaledOrNull(q,":u",g.utilization,10.0);
         // Only the VRAM percentage is stored; the absolute used/total MiB are
         // live values (snapshot JSON) and would be a per-sample waste anyway.
@@ -199,14 +245,6 @@ bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
             ? g.memoryUsedMiB * 100.0 / g.memoryTotalMiB : lmNaN();
         bindScaledOrNull(q,":mp",memPct,10.0);
         bindScaledOrNull(q,":temp",g.temperatureC,10.0); bindScaledOrNull(q,":power",g.powerW,100.0); bindScaledOrNull(q,":freq",g.frequencyMHz,1.0);
-        if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
-    }
-
-    q.prepare("INSERT OR REPLACE INTO cpu_cores_raw VALUES(:ts,:core,:u)");
-    for (int core = 0; core < m.cpuCores.size(); ++core) {
-        if (!std::isfinite(m.cpuCores[core])) continue; // offline / no-delta core: nothing to store
-        q.bindValue(":ts", m.timestamp); q.bindValue(":core", core);
-        bindScaledOrNull(q, ":u", m.cpuCores[core], 10.0);
         if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
     }
 
@@ -264,12 +302,12 @@ bool MetricsDatabase::maintain(qint64 now, const RetentionPolicy &policy, QStrin
       FROM system_raw WHERE ts < %1 GROUP BY (ts/300))").arg(openBucket);
     const QString aggGpu5 = QString(R"(
       INSERT OR REPLACE INTO gpu_5m
-      SELECT (ts/300)*300,id,MAX(vendor),MAX(name),MAX(driver),MAX(state),CAST(ROUND(AVG(util)) AS INTEGER),CAST(ROUND(AVG(mem_pct)) AS INTEGER),CAST(ROUND(AVG(temp)) AS INTEGER),CAST(ROUND(AVG(power)) AS INTEGER),CAST(ROUND(AVG(freq)) AS INTEGER)
+      SELECT (ts/300)*300,id,MAX(state),CAST(ROUND(AVG(util)) AS INTEGER),CAST(ROUND(AVG(mem_pct)) AS INTEGER),CAST(ROUND(AVG(temp)) AS INTEGER),CAST(ROUND(AVG(power)) AS INTEGER),CAST(ROUND(AVG(freq)) AS INTEGER)
       FROM gpu_raw WHERE ts < %1 GROUP BY (ts/300),id)").arg(openBucket);
-    const QString aggCpu5 = QString(R"(
-      INSERT OR REPLACE INTO cpu_cores_5m
-      SELECT (ts/300)*300,core,CAST(ROUND(AVG(util)) AS INTEGER)
-      FROM cpu_cores_raw WHERE ts < %1 GROUP BY (ts/300),core)").arg(openBucket);
+    const QString aggPing5 = QString(R"(
+      INSERT OR REPLACE INTO netping_5m
+      SELECT (ts/300)*300,host,CAST(ROUND(AVG(ms)) AS INTEGER)
+      FROM netping_raw WHERE ts < %1 GROUP BY (ts/300),host)").arg(openBucket);
     const QString aggDisks5 = QString(R"(
       INSERT OR REPLACE INTO disks_5m
       SELECT (ts/300)*300,mount,CAST(ROUND(AVG(used_pct)) AS INTEGER)
@@ -291,15 +329,18 @@ bool MetricsDatabase::maintain(qint64 now, const RetentionPolicy &policy, QStrin
     const QString purgeNoSignalGpu5m =
         "DELETE FROM gpu_5m WHERE util IS NULL AND temp IS NULL AND power IS NULL AND mem_pct IS NULL AND freq IS NULL";
     const QStringList stmts = {
-        aggSys5, aggGpu5, aggCpu5, aggDisks5,
+        aggSys5, aggGpu5, aggPing5, aggDisks5,
         purgeNoSignalGpu, purgeNoSignalGpu5m,
         QString("DELETE FROM system_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM gpu_raw WHERE ts < %1").arg(detailCutoff),
-        QString("DELETE FROM cpu_cores_raw WHERE ts < %1").arg(detailCutoff),
+        QString("DELETE FROM netping_raw WHERE ts < %1").arg(detailCutoff),
         QString("DELETE FROM disks_raw WHERE ts < %1").arg(detailCutoff),
+        // Per-core CPU is today-only: discard everything before local
+        // midnight regardless of the retention policy.
+        QString("DELETE FROM cpu_cores_raw WHERE ts < %1").arg(dayStart),
         QString("DELETE FROM system_5m WHERE ts < %1").arg(archiveCutoff),
         QString("DELETE FROM gpu_5m WHERE ts < %1").arg(archiveCutoff),
-        QString("DELETE FROM cpu_cores_5m WHERE ts < %1").arg(archiveCutoff),
+        QString("DELETE FROM netping_5m WHERE ts < %1").arg(archiveCutoff),
         QString("DELETE FROM disks_5m WHERE ts < %1").arg(archiveCutoff)
     };
     for (const auto &s : stmts) if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
@@ -346,11 +387,11 @@ bool MetricsDatabase::migrate(QString *error) {
     // A brand-new database already has the current layout from execSchema, so
     // it stamps straight to the latest version and skips the legacy chain.
     // Existing databases keep their stored version and migrate step by step.
-    if (!q.exec("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version','9')")) {
+    if (!q.exec("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version','11')")) {
         if (error) *error = q.lastError().text();
         return false;
     }
-    if (!q.exec("UPDATE metadata SET value='9' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2")) {
+    if (!q.exec("UPDATE metadata SET value='11' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2")) {
         if (error) *error = q.lastError().text();
         return false;
     }
@@ -371,6 +412,12 @@ bool MetricsDatabase::migrate(QString *error) {
     }
     if (schemaVersion() < 9) {
         if (!migrateToV8(error)) { return false; }
+    }
+    if (schemaVersion() < 10) {
+        if (!migrateToV10(error)) { return false; }
+    }
+    if (schemaVersion() < 11) {
+        if (!migrateToV11(error)) { return false; }
     }
     return true;
 }
@@ -479,6 +526,68 @@ bool MetricsDatabase::migrateToV8(QString *error) {
         "CREATE INDEX IF NOT EXISTS idx_gpu_raw_id_ts ON gpu_raw(id,ts)",
         "CREATE INDEX IF NOT EXISTS idx_gpu_5m_id_ts ON gpu_5m(id,ts)",
         "UPDATE metadata SET value='9' WHERE key='schema_version'"
+    };
+    for (const auto &s : stmts) {
+        if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
+    }
+    return true;
+}
+
+// v9 -> v10: the DB-diet step. Per-core CPU history (the single largest
+// consumer of disk space — one row per core per sample) is dropped entirely;
+// only the average CPU curve is kept. GPU sample rows lose the per-row static
+// identity columns (vendor/name/driver) — that data moves to gpu_meta, one
+// row per device. And the website-latency domain (netping_raw/netping_5m) is
+// added. cpu_cores tables created by migrateToV4 are removed here; the v4
+// step itself stays in the chain untouched for chain integrity.
+bool MetricsDatabase::migrateToV10(QString *error) {
+    QSqlQuery q(db_);
+    const QStringList stmts = {
+        "DROP TABLE IF EXISTS cpu_cores_raw",
+        "DROP TABLE IF EXISTS cpu_cores_5m",
+        "DROP INDEX IF EXISTS idx_cpu_cores_raw_core_ts",
+        "DROP INDEX IF EXISTS idx_cpu_cores_5m_core_ts",
+        "CREATE TABLE IF NOT EXISTS gpu_meta (id TEXT PRIMARY KEY, vendor TEXT, name TEXT, driver TEXT)",
+        // Backfill per-device identity from the existing sample rows...
+        "INSERT OR IGNORE INTO gpu_meta(id,vendor,name,driver) SELECT id,MAX(vendor),MAX(name),MAX(driver) FROM gpu_raw GROUP BY id",
+        "INSERT OR IGNORE INTO gpu_meta(id,vendor,name,driver) SELECT id,MAX(vendor),MAX(name),MAX(driver) FROM gpu_5m GROUP BY id",
+        // ...then rebuild both gpu tables without the identity columns.
+        "CREATE TABLE gpu_raw_new (ts INTEGER NOT NULL, id TEXT NOT NULL, state TEXT, util INTEGER, mem_pct INTEGER, temp INTEGER, power INTEGER, freq INTEGER, PRIMARY KEY(ts,id))",
+        "INSERT INTO gpu_raw_new SELECT ts,id,state,util,mem_pct,temp,power,freq FROM gpu_raw",
+        "DROP TABLE gpu_raw",
+        "ALTER TABLE gpu_raw_new RENAME TO gpu_raw",
+        "CREATE TABLE gpu_5m_new (ts INTEGER NOT NULL, id TEXT NOT NULL, state TEXT, util INTEGER, mem_pct INTEGER, temp INTEGER, power INTEGER, freq INTEGER, PRIMARY KEY(ts,id))",
+        "INSERT INTO gpu_5m_new SELECT ts,id,state,util,mem_pct,temp,power,freq FROM gpu_5m",
+        "DROP TABLE gpu_5m",
+        "ALTER TABLE gpu_5m_new RENAME TO gpu_5m",
+        "CREATE TABLE IF NOT EXISTS netping_raw (ts INTEGER NOT NULL, host TEXT NOT NULL, ms INTEGER, PRIMARY KEY(ts,host))",
+        "CREATE TABLE IF NOT EXISTS netping_5m (ts INTEGER NOT NULL, host TEXT NOT NULL, ms INTEGER, PRIMARY KEY(ts,host))",
+        "CREATE INDEX IF NOT EXISTS idx_netping_raw_host_ts ON netping_raw(host,ts)",
+        "CREATE INDEX IF NOT EXISTS idx_netping_5m_host_ts ON netping_5m(host,ts)",
+        // Force a VACUUM on the next maintain() so dropping cpu_cores
+        // actually shrinks the file on disk.
+        "DELETE FROM metadata WHERE key='last_vacuum'",
+        "UPDATE metadata SET value='10' WHERE key='schema_version'"
+    };
+    for (const auto &s : stmts) {
+        if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
+    }
+    return true;
+}
+
+// v10 -> v11: per-core CPU curves return, but as a today-only domain — a
+// deliberate exception to the two-table layout. One raw table only (no 5-minute
+// archive): maintain() deletes every row before local midnight, so nothing
+// aggregates or survives the day, and cpuCoreHistory() clamps its window to
+// today as well, covering the gap between midnight and the next maintain()
+// run. A v10 database starts with an empty table (v10 dropped the old ones);
+// a fresh database already has the table from execSchema and skips this step.
+bool MetricsDatabase::migrateToV11(QString *error) {
+    QSqlQuery q(db_);
+    const QStringList stmts = {
+        "CREATE TABLE IF NOT EXISTS cpu_cores_raw (ts INTEGER NOT NULL, core INTEGER NOT NULL, util INTEGER, PRIMARY KEY(ts,core))",
+        "CREATE INDEX IF NOT EXISTS idx_cpu_cores_raw_core_ts ON cpu_cores_raw(core,ts)",
+        "UPDATE metadata SET value='11' WHERE key='schema_version'"
     };
     for (const auto &s : stmts) {
         if (!q.exec(s)) { if (error) *error = q.lastError().text(); return false; }
@@ -692,20 +801,22 @@ std::optional<SystemMetric> MetricsDatabase::latestSystem() const {
             return (a.mountPoint == "/") != (b.mountPoint == "/") && a.mountPoint == "/";
         });
     }
+    // Per-core readings stored at the newest cpu_cores_raw timestamp (may
+    // trail system_raw by a tick when the core scan came up empty).
     {
-        QSqlQuery cores(db_);
-        if (cores.exec("SELECT core,util FROM cpu_cores_raw WHERE ts=(SELECT MAX(ts) FROM cpu_cores_raw) ORDER BY core")) {
+        QSqlQuery cq(db_);
+        if (cq.exec("SELECT core,util FROM cpu_cores_raw WHERE ts=(SELECT MAX(ts) FROM cpu_cores_raw) ORDER BY core")) {
             int maxCore = -1;
-            QVector<QPair<int,double>> rows;
-            while (cores.next()) {
-                const int core = cores.value(0).toInt();
-                if (core < 0 || core > 8192) continue;
+            QVector<double> utils;
+            while (cq.next()) {
+                const int core = cq.value(0).toInt();
                 maxCore = std::max(maxCore, core);
-                rows.push_back({core, sqlScaled(cores.value(1), 10.0)});
+                if (utils.size() <= core) utils.resize(core + 1);
+                utils[core] = sqlScaled(cq.value(1), 10.0);
             }
             if (maxCore >= 0) {
-                m.cpuCores.fill(lmNaN(), maxCore + 1);
-                for (const auto &r : rows) { m.cpuCores[r.first] = r.second; }
+                m.cpuCores = QVector<double>(maxCore + 1, lmNaN());
+                for (int i = 0; i < utils.size(); ++i) m.cpuCores[i] = utils.at(i);
             }
         }
     }
@@ -716,8 +827,8 @@ QVector<GpuMetric> MetricsDatabase::latestGpus() const {
     QVector<GpuMetric> out;
     QSqlQuery q(db_);
     // Latest row per device: a transient miss for one GPU on a tick must not
-    // hide it while its sibling still reports.
-    if (!q.exec("SELECT id,vendor,name,driver,state,util,mem_pct,temp,power,freq FROM gpu_raw AS g WHERE ts=(SELECT MAX(ts) FROM gpu_raw WHERE id=g.id) ORDER BY vendor,name")) return out;
+    // hide it while its sibling still reports. Identity comes from gpu_meta.
+    if (!q.exec("SELECT g.id,m.vendor,m.name,m.driver,g.state,g.util,g.mem_pct,g.temp,g.power,g.freq FROM gpu_raw AS g LEFT JOIN gpu_meta AS m ON m.id=g.id WHERE ts=(SELECT MAX(ts) FROM gpu_raw WHERE id=g.id) ORDER BY g.id")) return out;
     while (q.next()) {
         GpuMetric g; g.id=q.value(0).toString(); g.vendor=q.value(1).toString(); g.name=q.value(2).toString(); g.driver=q.value(3).toString(); g.state=q.value(4).toString();
         g.utilization=sqlScaled(q.value(5),10.0); g.memoryUsedPct=sqlScaled(q.value(6),10.0); g.temperatureC=sqlScaled(q.value(7),10.0); g.powerW=sqlScaled(q.value(8),100.0); g.frequencyMHz=sqlScaled(q.value(9),1.0);
@@ -735,40 +846,9 @@ QString MetricsDatabase::gpuSourceTable(qint64 span) const {
     const auto c = AppConfig::load();
     return span <= static_cast<qint64>(std::max(6, c.detailRetentionDays)) * 86400 ? "gpu_raw" : "gpu_5m";
 }
-QString MetricsDatabase::cpuSourceTable(qint64 span) const {
+QString MetricsDatabase::pingSourceTable(qint64 span) const {
     const auto c = AppConfig::load();
-    return span <= static_cast<qint64>(std::max(6, c.detailRetentionDays)) * 86400 ? "cpu_cores_raw" : "cpu_cores_5m";
-}
-
-QVector<int> MetricsDatabase::cpuCoreIds() const {
-    QVector<int> ids;
-    QSqlQuery q(db_);
-    if (q.exec("SELECT DISTINCT core FROM cpu_cores_raw UNION SELECT DISTINCT core FROM cpu_cores_5m ORDER BY core")) {
-        while (q.next()) {
-            const int core = q.value(0).toInt();
-            if (core >= 0 && core <= 8192) { ids.push_back(core); }
-        }
-    }
-    return ids;
-}
-
-QVector<CpuCoreSample> MetricsDatabase::cpuCoreHistory(qint64 from, qint64 to, int targetPoints) const {
-    QVector<CpuCoreSample> out;
-    const qint64 span = std::max<qint64>(1, to - from);
-    const qint64 bucket = std::max<qint64>(1, span / std::max(100, targetPoints));
-    const QString table = cpuSourceTable(span);
-    QSqlQuery q(db_);
-    q.prepare(QString("SELECT (ts/:bucket)*:bucket AS b,core,AVG(util) FROM %1 WHERE ts BETWEEN :from AND :to GROUP BY b,core ORDER BY b").arg(table));
-    q.bindValue(":bucket", bucket); q.bindValue(":from", from); q.bindValue(":to", to);
-    if (!q.exec()) return out;
-    while (q.next()) {
-        CpuCoreSample s;
-        s.timestamp = q.value(0).toLongLong();
-        s.core = q.value(1).toInt();
-        s.utilization = sqlScaled(q.value(2), 10.0);
-        out.push_back(s);
-    }
-    return out;
+    return span <= static_cast<qint64>(std::max(6, c.detailRetentionDays)) * 86400 ? "netping_raw" : "netping_5m";
 }
 
 QVector<SystemMetric> MetricsDatabase::systemHistory(qint64 from, qint64 to, int targetPoints) const {
@@ -810,16 +890,48 @@ QStringList MetricsDatabase::gpuIds(bool signalOnly) const {
     return ids; }
 QString MetricsDatabase::gpuName(const QString &id) const {
     QSqlQuery q(db_);
-    const char *tables[] = {"gpu_raw", "gpu_5m"};
-    for (const char *t : tables) {
-        q.prepare(QString("SELECT name FROM %1 WHERE id=:id ORDER BY ts DESC LIMIT 1").arg(QString::fromLatin1(t)));
-        q.bindValue(":id", id);
-        if (q.exec() && q.next()) {
-            const QString name = q.value(0).toString();
-            if (!name.isEmpty()) { return name; }
-        }
+    q.prepare("SELECT vendor,name FROM gpu_meta WHERE id=:id");
+    q.bindValue(":id", id);
+    if (q.exec() && q.next()) {
+        const QString vendor = q.value(0).toString();
+        const QString name = q.value(1).toString();
+        if (!name.isEmpty()) return name;
+        if (!vendor.isEmpty()) return vendor + " " + id;
     }
     return id;
+}
+
+QVector<int> MetricsDatabase::cpuCoreIds() const {
+    QVector<int> out;
+    QSqlQuery q(db_);
+    if (q.exec("SELECT DISTINCT core FROM cpu_cores_raw ORDER BY core"))
+        while (q.next()) out << q.value(0).toInt();
+    return out;
+}
+
+QVector<CpuCoreSample> MetricsDatabase::cpuCoreHistory(qint64 from, qint64 to, int targetPoints) const {
+    QVector<CpuCoreSample> out;
+    // Today-only domain: never surface rows from before local midnight, even
+    // if the maintain() purge has not run yet (it fires on a timer).
+    const qint64 dayStart = QDateTime(QDate::currentDate(), QTime(0, 0)).toSecsSinceEpoch();
+    const qint64 fromClamped = std::max(from, dayStart);
+    if (to < fromClamped) return out;
+    const qint64 span = std::max<qint64>(1, to - fromClamped);
+    const qint64 bucket = std::max<qint64>(1, span / std::max(100, targetPoints));
+    QSqlQuery q(db_);
+    q.prepare("SELECT (ts/:bucket)*:bucket AS b, core, AVG(util) FROM cpu_cores_raw WHERE ts BETWEEN :from AND :to GROUP BY b, core ORDER BY b, core");
+    q.bindValue(":bucket", bucket);
+    q.bindValue(":from", fromClamped);
+    q.bindValue(":to", to);
+    if (!q.exec()) return out;
+    while (q.next()) {
+        CpuCoreSample s;
+        s.timestamp = q.value(0).toLongLong();
+        s.core = q.value(1).toInt();
+        s.utilization = sqlScaled(q.value(2), 10.0);
+        out.push_back(s);
+    }
+    return out;
 }
 
 QStringList MetricsDatabase::diskMountPoints() const {
@@ -853,6 +965,54 @@ QVector<DiskInfo> MetricsDatabase::diskHistory(const QString &mountPoint, qint64
         d.mountPoint = mountPoint;
         d.usedPct = sqlScaled(q.value(1), 10.0);
         out.push_back(d);
+    }
+    return out;
+}
+
+bool MetricsDatabase::insertPing(const QVector<PingSample> &samples, QString *error) {
+    if (samples.isEmpty()) return true;
+    if (!db_.transaction()) { if (error) *error = db_.lastError().text(); return false; }
+    QSqlQuery q(db_);
+    q.prepare("INSERT OR REPLACE INTO netping_raw(ts,host,ms) VALUES(:ts,:host,:ms)");
+    for (const auto &s : samples) {
+        // Failures must never land in the database: an unreachable host is a
+        // chart gap (red band), not a fake latency value.
+        if (!std::isfinite(s.ms) || s.ms < 0.0) continue;
+        q.bindValue(":ts", s.timestamp);
+        q.bindValue(":host", s.host);
+        q.bindValue(":ms", static_cast<qlonglong>(std::llround(s.ms)));
+        if (!q.exec()) { db_.rollback(); if (error) *error = q.lastError().text(); return false; }
+    }
+    return db_.commit();
+}
+
+QStringList MetricsDatabase::pingHosts() const {
+    QStringList hosts;
+    QSqlQuery q(db_);
+    if (q.exec("SELECT DISTINCT host FROM netping_raw UNION SELECT DISTINCT host FROM netping_5m ORDER BY host")) {
+        while (q.next()) hosts << q.value(0).toString();
+    }
+    return hosts;
+}
+
+QVector<PingSample> MetricsDatabase::pingHistory(const QString &host, qint64 from, qint64 to, int targetPoints) const {
+    QVector<PingSample> out;
+    const qint64 span = std::max<qint64>(1, to - from);
+    const qint64 bucket = std::max<qint64>(1, span / std::max(100, targetPoints));
+    const QString table = pingSourceTable(span);
+    QSqlQuery q(db_);
+    q.prepare(QString(R"(SELECT (ts/:bucket)*:bucket AS b, AVG(ms) FROM %1 WHERE host=:host AND ts BETWEEN :from AND :to GROUP BY b ORDER BY b)").arg(table));
+    q.bindValue(":bucket", bucket);
+    q.bindValue(":host", host);
+    q.bindValue(":from", from);
+    q.bindValue(":to", to);
+    if (!q.exec()) return out;
+    while (q.next()) {
+        PingSample s;
+        s.timestamp = q.value(0).toLongLong();
+        s.host = host;
+        s.ms = q.value(1).isNull() ? lmNaN() : q.value(1).toDouble();
+        out.push_back(s);
     }
     return out;
 }

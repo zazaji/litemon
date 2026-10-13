@@ -380,9 +380,12 @@ void MainWindow::setupUi(){
     auto*cpuPage=new QWidget;auto*cpuLay=new QVBoxLayout(cpuPage);cpuLay->setContentsMargins(20,10,20,12);cpuLay->setSpacing(8);
     cpuUsage_=new ChartWidget;cpuUsage_->setTitle("CPU utilization","%");cpuUsage_->setFixedYRange(0,100);cpuUsage_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);cpuUsage_->setMinimumHeight(120);cpuLay->addWidget(cpuUsage_,1);
     cpuTemp_=new ChartWidget;cpuTemp_->setTitle("CPU temperature","°C");cpuTemp_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);cpuTemp_->setMinimumHeight(120);cpuLay->addWidget(cpuTemp_,1);
+    // Per-core grid takes the lower half of the page (stretch 2 vs 1+1 above),
+    // four charts per row. Data is today-only: rows are discarded at local
+    // midnight, so the section hides for windows entirely in the past.
     cpuCoresLabel_=sectionLabel(tr("Per-core utilization"));cpuLay->addWidget(cpuCoresLabel_);
     cpuCoresScroll_=new QScrollArea;cpuCoresScroll_->setWidgetResizable(true);cpuCoresScroll_->setFrameShape(QFrame::NoFrame);
-    auto*coresHost=new QWidget;cpuCoresLayout_=new QGridLayout(coresHost);cpuCoresLayout_->setSpacing(6);cpuCoresLayout_->setContentsMargins(0,0,0,0);
+    auto*coresHost=new QWidget;cpuCoresLayout_=new QGridLayout(coresHost);cpuCoresLayout_->setSpacing(4);cpuCoresLayout_->setContentsMargins(0,0,0,0);
     cpuCoresLayout_->setColumnStretch(0,1);cpuCoresLayout_->setColumnStretch(1,1);cpuCoresLayout_->setColumnStretch(2,1);cpuCoresLayout_->setColumnStretch(3,1);
     cpuCoresScroll_->setWidget(coresHost);cpuLay->addWidget(cpuCoresScroll_,2);stack_->addWidget(cpuPage);
     auto*mem=makeHistoryPage(&mem_,&swap_);mem_->setTitle("Memory usage","%");mem_->setFixedYRange(0,100);swap_->setTitle("Swap usage","%");swap_->setFixedYRange(0,100);
@@ -401,7 +404,7 @@ void MainWindow::setupUi(){
     static_cast<QVBoxLayout*>(mem->layout())->addWidget(treeRow,1);
     memPage_=mem;
     stack_->addWidget(mem);
-    auto*netPage=makeHistoryPage(&net_,&diskIo_);net_->setTitle("Network throughput","MiB/s");diskIo_->setTitle("Disk I/O throughput","MiB/s");stack_->addWidget(netPage);
+    auto*netPage=makeHistoryPage(&net_,&netLatency_);net_->setTitle("Network throughput","MiB/s");netLatency_->setTitle("Website latency","ms");stack_->addWidget(netPage);
     auto*diskPage=new QWidget;auto*diskLay=new QVBoxLayout(diskPage);diskLay->setContentsMargins(20,10,20,12);diskLay->setSpacing(8);
     auto*diskBar=new QHBoxLayout;diskBar->addWidget(new QLabel(tr("Device:")));diskSelector_=new QComboBox;diskSelector_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);diskBar->addWidget(diskSelector_,1);diskLay->addLayout(diskBar);
     diskUsage_=new ChartWidget;diskUsage_->setTitle("Filesystem usage","%");diskUsage_->setFixedYRange(0,100);diskUsage_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);diskUsage_->setMinimumHeight(120);diskLay->addWidget(diskUsage_,1);
@@ -1059,11 +1062,31 @@ void MainWindow::refreshHistory(){
     const auto h=db_.systemHistory(from,to,AppConfig::load().historyTargetPoints);
     cpuUsage_->setSeries({{"Usage",points(h,[](const auto&m){return m.cpuUsage;})}});cpuTemp_->setSeries({{"Temperature",points(h,[](const auto&m){return m.cpuTemperatureC;})}});
     mem_->setSeries({{"Used",points(h,[](const auto&m){return m.memoryUsedPct;})}});swap_->setSeries({{"Used",points(h,[](const auto&m){return m.swapUsedPct;})}});
-    net_->setSeries({{"Download",points(h,[](const auto&m){return m.networkRxMiBs;})},{"Upload",points(h,[](const auto&m){return m.networkTxMiBs;})}});diskIo_->setSeries({{"Read",points(h,[](const auto&m){return m.diskReadMiBs;})},{"Write",points(h,[](const auto&m){return m.diskWriteMiBs;})}});
+    net_->setSeries({{"Download",points(h,[](const auto&m){return m.networkRxMiBs;})},{"Upload",points(h,[](const auto&m){return m.networkTxMiBs;})}});
+    // Website latency: one series per configured host (feature off -> empty
+    // chart). Unreachable probes are never recorded, so outages show up as
+    // the usual gap/red band rather than a zero line.
+    {
+        const AppConfig cfg = AppConfig::load();
+        QVector<ChartWidget::Series> latencySeries;
+        if (cfg.netLatencyEnabled) {
+            for (const QString &host : cfg.netLatencyHosts) {
+                QVector<ChartWidget::Point> pts;
+                const auto samples = db_.pingHistory(host, from, to, cfg.historyTargetPoints);
+                pts.reserve(samples.size());
+                for (const auto &s : samples) pts.push_back({s.timestamp, s.ms});
+                latencySeries.push_back({host, pts});
+            }
+        }
+        netLatency_->setSeries(latencySeries);
+    }
     battery_->setSeries({{"Level",points(h,[](const auto&m){return m.batteryPercent;})},{"Health",points(h,[](const auto&m){return m.batteryHealthPercent;})}});batteryPower_->setSeries({{"Power",points(h,[](const auto&m){return m.batteryPowerW;})}});batteryTemp_->setSeries({{"Temperature",points(h,[](const auto&m){return m.batteryTemperatureC;})}});
     diskTemp_->setSeries({{"Temperature",points(h,[](const auto&m){return m.nvmeTemperatureC;})}});diskIoPage_->setSeries({{"Read",points(h,[](const auto&m){return m.diskReadMiBs;})},{"Write",points(h,[](const auto&m){return m.diskWriteMiBs;})}});
-    // Hide per-core charts for large time ranges (>7 days)
-    const bool showCores = span <= 604800;
+    // Per-core curves are today-only (maintain() discards rows past local
+    // midnight), so hide the section for long ranges and for windows that lie
+    // entirely in the past — there is nothing to show there by design.
+    const qint64 todayStart=QDateTime(QDate::currentDate(),QTime(0,0)).toSecsSinceEpoch();
+    const bool showCores = span <= 604800 && to >= todayStart;
     cpuCoresLabel_->setVisible(showCores);
     cpuCoresScroll_->setVisible(showCores);
     if (showCores) { refreshCpuCoreCharts(from, to); }
@@ -1094,16 +1117,16 @@ void MainWindow::refreshCpuCoreCharts(qint64 from, qint64 to){
         cpuCoreIds_=ids;
         while (auto *item=cpuCoresLayout_->takeAt(0)) { if (item->widget()) item->widget()->deleteLater(); delete item; }
         cpuCoreCharts_.clear();
-        int c=0;
-        for (int core : ids) {
+        for (int c=0;c<ids.size();++c) {
             auto *ch=new ChartWidget;
-            ch->setTitle(QString("Core %1").arg(core),"%");
+            // No title: the legend (dot + "Core N") is the only header label,
+            // otherwise "Core N" is drawn twice on one row.
+            ch->setTitle(QString(),"%");
             ch->setFixedYRange(0,100);
-            ch->setMinimumSize(180,140);
+            ch->setMinimumSize(150,110);
             ch->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             cpuCoresLayout_->addWidget(ch, c/4, c%4);
             cpuCoreCharts_.push_back(ch);
-            ++c;
         }
         if (ids.isEmpty()) {
             auto *l=new QLabel(tr("No per-core CPU data yet — waiting for the collector."));

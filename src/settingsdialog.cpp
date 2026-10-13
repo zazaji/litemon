@@ -9,7 +9,10 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QSpinBox>
 #include <QVBoxLayout>
@@ -53,13 +56,19 @@ static void fillTrayCombo(QComboBox *cb, const QStringList &diskMounts) {
 SettingsDialog::SettingsDialog(QWidget *parent, const QStringList &diskMounts)
     : QDialog(parent), diskMounts_(diskMounts) {
     setWindowTitle(tr("LiteMon Settings"));
-    setMinimumWidth(430);
+    setMinimumWidth(560);
     const AppConfig c = AppConfig::load();
     auto *root = new QVBoxLayout(this);
     auto *hint = new QLabel(tr("Settings are stored per user. Restart the collector service after changing sampling or retention."), this);
     hint->setWordWrap(true);
     root->addWidget(hint);
-    auto *form = new QFormLayout;
+    // Two columns: sampling/retention/GPU on the left, tray digits on the
+    // right, website latency full-width below.
+    auto *columns = new QHBoxLayout;
+    auto *form = new QFormLayout;  // left column
+    auto *right = new QFormLayout; // right column
+    columns->addLayout(form, 1);
+    columns->addLayout(right, 1);
     // Sampling intervals are edited in whole minutes; AppConfig keeps seconds.
     systemInterval_ = spin(1, 5, qMax(1, c.sampleIntervalSec / 60), this);
     gpuInterval_ = spin(1, 10, c.gpuIntervalSec / 60, this);
@@ -107,7 +116,7 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QStringList &diskMounts)
     for (int i = 0; i < 4; ++i) select(sensors[i], compact[i]);
     traySeparate_ = new QCheckBox(tr("Separate tray icons (one icon per value)"), this);
     traySeparate_->setChecked(c.traySeparate);
-    form->addRow(tr("Tray layout"), traySeparate_);
+    right->addRow(tr("Tray layout"), traySeparate_);
     // Sensor rows are added by the loop below, each paired with its alarm
     // spin — adding them here as well would duplicate every row.
     // Alarm thresholds: when a slot's value reaches the threshold its digit
@@ -146,10 +155,27 @@ SettingsDialog::SettingsDialog(QWidget *parent, const QStringList &diskMounts)
         connect(cb, &QComboBox::currentIndexChanged, this, [applyAlarmUnit, cb, spin]{ applyAlarmUnit(cb, spin); });
         applyAlarmUnit(cb, spin);
         spin->setValue(static_cast<int>(std::lround(compactAlarm[i])));
-        form->addRow(tr("Tray digits %1 (sensor)").arg(i + 1), cb);
-        form->addRow(tr("Tray digits %1 alarm (at)").arg(i + 1), spin);
+        right->addRow(tr("Tray digits %1 (sensor)").arg(i + 1), cb);
+        right->addRow(tr("Tray digits %1 alarm (at)").arg(i + 1), spin);
     }
-    root->addLayout(form);
+    // Website latency: the Network page's lower chart. Enabled explicitly;
+    // up to five hostnames, blank fields are ignored on save.
+    auto *latencyGroup = new QGroupBox(tr("Website latency (Network page)"), this);
+    auto *latencyLay = new QVBoxLayout(latencyGroup);
+    netLatencyEnabled_ = new QCheckBox(tr("Record website latency (responding hosts only)"), this);
+    netLatencyEnabled_->setChecked(c.netLatencyEnabled);
+    latencyLay->addWidget(netLatencyEnabled_);
+    auto *latencyForm = new QFormLayout;
+    for (int i = 0; i < 5; ++i) {
+        auto *edit = new QLineEdit(this);
+        edit->setPlaceholderText(i == 0 ? QStringLiteral("baidu.com") : tr("(unused)"));
+        if (i < c.netLatencyHosts.size()) edit->setText(c.netLatencyHosts.at(i));
+        netHosts_.append(edit);
+        latencyForm->addRow(tr("Website %1").arg(i + 1), edit);
+    }
+    latencyLay->addLayout(latencyForm);
+    root->addWidget(latencyGroup);
+    root->addLayout(columns);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &SettingsDialog::save);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -178,6 +204,19 @@ void SettingsDialog::save() {
     c.traySeparate = traySeparate_->isChecked();
     c.theme = theme_->currentData().toString();
     c.autostart = autostart_->isChecked();
+    // Website latency: trim each field, drop blanks and duplicates, cap at 5
+    // (load() re-sanitizes scheme prefixes; an empty list falls back to the
+    // defaults there).
+    c.netLatencyEnabled = netLatencyEnabled_->isChecked();
+    {
+        QStringList hosts;
+        for (QLineEdit *edit : netHosts_) {
+            const QString h = edit->text().trimmed();
+            if (!h.isEmpty() && !hosts.contains(h)) hosts << h;
+        }
+        if (hosts.size() > 5) hosts = hosts.mid(0, 5);
+        c.netLatencyHosts = hosts;
+    }
     c.save();
     QString error;
     if (!AppConfig::setAutostartEnabled(c.autostart, &error)) {

@@ -42,6 +42,24 @@ AppConfig AppConfig::load() {
     c.trayAlarm3 = std::clamp(s.value("tray/alarm3", c.trayAlarm3).toDouble(), 0.0, 10000.0);
     c.trayAlarm4 = std::clamp(s.value("tray/alarm4", c.trayAlarm4).toDouble(), 0.0, 10000.0);
     c.traySeparate = s.value("tray/separate", c.traySeparate).toBool();
+    c.netLatencyEnabled = s.value("network/latency_enabled", c.netLatencyEnabled).toBool();
+    {
+        // Sanitize the configured websites: strip scheme/trailing slash, trim,
+        // drop empties and duplicates, cap at 5. An empty or missing list
+        // falls back to the built-in defaults.
+        QStringList raw = s.value("network/latency_hosts", c.netLatencyHosts).toStringList();
+        if (raw.size() == 1 && raw.first().contains(',')) raw = raw.first().split(',');
+        QStringList hosts;
+        for (QString h : raw) {
+            for (const QStringView prefix : {QStringLiteral("https://"), QStringLiteral("http://")})
+                if (h.startsWith(prefix)) h.remove(0, prefix.size());
+            while (h.endsWith('/')) h.chop(1);
+            h = h.trimmed();
+            if (!h.isEmpty() && !hosts.contains(h)) hosts << h;
+        }
+        if (hosts.size() > 5) hosts = hosts.mid(0, 5);
+        c.netLatencyHosts = hosts.isEmpty() ? AppConfig{}.netLatencyHosts : hosts;
+    }
     const QString t = s.value("ui/theme").toString();
     c.theme = (t == "light" || t == "dark") ? t : "system";
     c.autostart = s.value("ui/autostart", c.autostart).toBool();
@@ -66,6 +84,8 @@ void AppConfig::save() const {
     s.setValue("tray/alarm3", trayAlarm3);
     s.setValue("tray/alarm4", trayAlarm4);
     s.setValue("tray/separate", traySeparate);
+    s.setValue("network/latency_enabled", netLatencyEnabled);
+    s.setValue("network/latency_hosts", netLatencyHosts);
     s.setValue("ui/theme", theme);
     s.setValue("ui/autostart", autostart);
     s.sync();

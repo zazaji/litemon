@@ -1,8 +1,10 @@
 #pragma once
 #include <QDialog>
+#include <QVector>
 
 class QCheckBox;
 class QComboBox;
+class QLineEdit;
 class QSpinBox;
 class SettingsDialog : public QDialog {
     Q_OBJECT
@@ -28,4 +30,7 @@ private:
     QSpinBox *trayAlarm3_ = nullptr;
     QSpinBox *trayAlarm4_ = nullptr;
     QCheckBox *traySeparate_ = nullptr;
+    // Website latency (Network page): enable switch + up to 5 host fields.
+    QCheckBox *netLatencyEnabled_ = nullptr;
+    QVector<QLineEdit *> netHosts_;
 };

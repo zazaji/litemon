@@ -151,7 +151,10 @@ Layout computeLayout(const QVector<ChartWidget::Series> &series, const QString &
     lay.maxTs = maxTs;
     lay.minY = minY;
     lay.maxY = maxY;
-    lay.decimals = (maxY - minY) < 10.0 ? 1 : 0;
+    // Tick labels need enough precision to stay distinct: at a sub-0.1 span
+    // (e.g. quiet-network MiB/s) one decimal rounds every gridline to 0.0/0.1.
+    const double span = maxY - minY;
+    lay.decimals = span < 0.1 ? 2 : (span < 10.0 ? 1 : 0);
     lay.timeFmt = rangeLabel(maxTs - minTs);
     return lay;
 }
