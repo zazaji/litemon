@@ -58,6 +58,26 @@ double readMemAvailableMiB();
 // when the journal is unreadable or has no matching entries.
 QVector<OomInfo> readOomEvents(int days);
 
+// Disk mount grouping over the content of /proc/mounts: one entry per
+// backing device. btrfs subvolumes of one partition (/, /home, /swap ...)
+// report identical usage numbers, so they collapse into a single entry
+// keyed on the primary mount point, with the top-level siblings kept as
+// display-only extras. Bind/nested aliases of an already-listed mount are
+// hidden entirely (user-confirmed dedup rule).
+struct DiskMountGroup {
+    QString primary;     // the mount point history keys and tray slots use
+    QStringList extras;  // sibling mounts sharing the same capacity
+};
+// Pure parser over a /proc/mounts payload; empty content yields {} (which is
+// also what happens on non-Linux, letting callers fall back to their own
+// platform listing).
+QVector<DiskMountGroup> parseDiskMountGroups(const QString &content);
+
+// Mount points that should never appear as user-facing disk entries. Shared
+// by the collector parser, the GUI and the database reader so all three
+// agree on the filter.
+bool isUserFacingMount(const QString &mount);
+
 // Parsers (unit-tested), one journalctl "-o short-unix" line each:
 //   kernel: "<epoch> <host> kernel: ... Out of memory: Killed process
 //           <pid> (<comm>) ... anon-rss:<n>kB ... UID <uid>"

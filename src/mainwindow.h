@@ -105,6 +105,12 @@ private:
     QHash<QString,Card> diskCards_;
     QWidget *diskCardsContainer_=nullptr;
     QGridLayout *diskCardsLayout_=nullptr;
+    // Live mount table labels ("/ · /home · /swap" for btrfs siblings of one
+    // device), keyed on every member mount of each group. Empty on platforms
+    // without /proc/mounts, where labels fall back to the bare mount point.
+    QHash<QString,QString> diskLabels_;
+    void refreshDiskMountLabels();
+    QString diskLabel(const QString &mount) const;
 
     ChartWidget *cpuUsage_=nullptr,*cpuTemp_=nullptr,*mem_=nullptr,*swap_=nullptr,*net_=nullptr,*netLatency_=nullptr,*diskUsage_=nullptr,*battery_=nullptr,*batteryPower_=nullptr,*batteryTemp_=nullptr,*diskTemp_=nullptr,*diskIoPage_=nullptr,*gpuUsage_=nullptr,*gpuAux_=nullptr,*gpuPower_=nullptr;
     // Per-core CPU grid (today-only data, four charts per row).

@@ -153,6 +153,84 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Disk mount grouping: btrfs subvolumes of one partition collapse into a
+    // single entry keyed on "/". Top-level siblings (/home, /swap) become
+    // extras; the same-subvolume waydroid alias (nested under /home) is
+    // hidden; pseudo and network filesystems and the blocklist are skipped.
+    {
+        const QString mounts = QLatin1String(
+            "/dev/nvme0n1p4 / btrfs rw,relatime,ssd,subvolid=256,subvol=/@ 0 0\n"
+            "/dev/nvme0n1p4 /swap btrfs rw,relatime,ssd,subvolid=258,subvol=/@swap 0 0\n"
+            "/dev/nvme0n1p4 /home btrfs rw,relatime,ssd,subvolid=257,subvol=/@home 0 0\n"
+            "/dev/nvme0n1p4 /home/zazaji/.local/share/waydroid/data/media/0/Download btrfs rw,relatime,ssd,subvolid=257,subvol=/@home 0 0\n"
+            "tmpfs /run tmpfs rw,nosuid,nodev 0 0\n"
+            "//nas/share /mnt/nas cifs rw 0 0\n"
+            "/dev/sda1 /boot/efi vfat rw 0 0\n"
+            "proc /proc proc rw,nosuid,nodev 0 0\n");
+        const auto groups = parseDiskMountGroups(mounts);
+        expect(groups.size() == 1, "btrfs subvolumes group to one entry");
+        if (!groups.isEmpty()) {
+            expect(groups[0].primary == QLatin1String("/"), "root is the primary mount");
+            expect(groups[0].extras.size() == 2, "extras: /home and /swap");
+            if (groups[0].extras.size() == 2) {
+                expect(groups[0].extras.at(0) == QLatin1String("/home"), "/home first extra");
+                expect(groups[0].extras.at(1) == QLatin1String("/swap"), "/swap second extra");
+            }
+        }
+    }
+    // Bind alias of the same subvolume: hidden even when not path-nested.
+    {
+        const QString mounts = QLatin1String(
+            "/dev/sdb1 / btrfs rw,subvolid=256,subvol=/@ 0 0\n"
+            "/dev/sdb1 /srv btrfs rw,subvolid=257,subvol=/@srv 0 0\n"
+            "/dev/sdb1 /srv2 btrfs rw,subvolid=257,subvol=/@srv 0 0\n");
+        const auto groups = parseDiskMountGroups(mounts);
+        expect(groups.size() == 1, "same-device mounts stay one group");
+        if (!groups.isEmpty()) {
+            expect(groups[0].primary == QLatin1String("/"), "root primary among siblings");
+            expect(groups[0].extras.size() == 1 && groups.at(0).extras.at(0) == QLatin1String("/srv"),
+                   "same-subvol /srv2 hidden, /srv kept");
+        }
+    }
+    // ext4 bind alias (no subvol marker): non-preferred mount hidden.
+    {
+        const QString mounts = QLatin1String(
+            "/dev/sda1 / ext4 rw,relatime 0 0\n"
+            "/dev/sda1 /mnt/data ext4 rw,relatime 0 0\n");
+        const auto groups = parseDiskMountGroups(mounts);
+        expect(groups.size() == 1, "ext4 double mount is one group");
+        if (!groups.isEmpty()) {
+            expect(groups[0].primary == QLatin1String("/") && groups[0].extras.isEmpty(),
+                   "ext4 bind alias hidden");
+        }
+    }
+    // Distinct devices stay separate entries, "/" first.
+    {
+        const QString mounts = QLatin1String(
+            "/dev/sdb1 /data ext4 rw 0 0\n"
+            "/dev/sda1 / ext4 rw 0 0\n");
+        const auto groups = parseDiskMountGroups(mounts);
+        expect(groups.size() == 2, "two devices, two groups");
+        if (groups.size() == 2) {
+            expect(groups.at(0).primary == QLatin1String("/") && groups.at(0).extras.isEmpty(),
+                   "root group first");
+            expect(groups.at(1).primary == QLatin1String("/data"), "second device kept");
+        }
+    }
+    // Octal escapes in mount paths decode (\040 = space).
+    {
+        const auto groups = parseDiskMountGroups(
+            QLatin1String("/dev/sdc1 /mnt/my\\040disk ext4 rw 0 0\n"));
+        expect(groups.size() == 1 && groups.at(0).primary == QLatin1String("/mnt/my disk"),
+               "octal-escaped mount path decoded");
+    }
+    // User-facing blocklist agrees with the database reader.
+    expect(!isUserFacingMount("/var/lib/waydroid"), "waydroid not user facing");
+    expect(!isUserFacingMount("/var/tmp"), "var/tmp not user facing");
+    expect(isUserFacingMount("/home"), "/home is user facing");
+    // Empty payload (also the non-Linux path) yields nothing.
+    expect(parseDiskMountGroups(QString()).isEmpty(), "empty mounts payload -> no groups");
+
     if (failures > 0) return 1;
     std::puts("Parsers PASS");
     return 0;

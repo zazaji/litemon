@@ -29,6 +29,10 @@ struct DiskInfo {
     double usedPct = lmNaN(); // used capacity, 0-100; totals are constant per mount and read live
     double readMiBs = lmNaN();
     double writeMiBs = lmNaN();
+    // Sibling mounts sharing this capacity (btrfs subvolumes of one
+    // partition, e.g. /home on the / partition). Display-only metadata:
+    // never persisted, the GUI re-derives it live from /proc/mounts.
+    QStringList extraMounts;
 };
 
 // One hwmon temperature/fan reading. label falls back to the chip name when

@@ -1,5 +1,6 @@
 #include "database.h"
 #include "appconfig.h"
+#include "linuxutils.h"
 
 #include <QDate>
 #include <QDateTime>
@@ -148,15 +149,9 @@ static bool gpuHasSignal(const GpuMetric &g) {
         || std::isfinite(g.memoryUsedMiB) || std::isfinite(g.frequencyMHz);
 }
 
-// Mount points that should never appear as user-facing disk entries. Shared
-// by diskMountPoints() and latestSystem() so both agree on the filter.
-static bool isUserFacingMount(const QString &m) {
-    static const QStringList skipPrefixes = {"/sys", "/var/lib/waydroid", "/boot/efi"};
-    static const QStringList skipExact = {"/root", "/var/tmp"};
-    for (const auto &p : skipPrefixes) { if (m.startsWith(p)) return false; }
-    for (const auto &e : skipExact) { if (m == e) return false; }
-    return true;
-}
+// Mount points that should never appear as user-facing disk entries live in
+// LinuxUtils::isUserFacingMount, shared with the collector parser and the GUI
+// so all three agree on the filter.
 
 bool MetricsDatabase::insert(const SystemMetric &m, QString *error) {
     // Drop redundant data before touching the database: GPUs without signal,
@@ -789,7 +784,7 @@ std::optional<SystemMetric> MetricsDatabase::latestSystem() const {
         if (dq.exec("SELECT mount,used_pct FROM disks_raw WHERE ts=(SELECT MAX(ts) FROM disks_raw) ORDER BY mount")) {
             while (dq.next()) {
                 const QString mount = dq.value(0).toString();
-                if (!isUserFacingMount(mount)) continue;
+                if (!LinuxUtils::isUserFacingMount(mount)) continue;
                 DiskInfo d;
                 d.mountPoint = mount;
                 d.usedPct = sqlScaled(dq.value(1), 10.0);
@@ -940,7 +935,7 @@ QStringList MetricsDatabase::diskMountPoints() const {
     if (q.exec("SELECT DISTINCT mount FROM disks_raw UNION SELECT DISTINCT mount FROM disks_5m ORDER BY mount")) {
         while (q.next()) {
             const QString m = q.value(0).toString();
-            if (isUserFacingMount(m)) mounts << m;
+            if (LinuxUtils::isUserFacingMount(m)) mounts << m;
         }
     }
     return mounts;

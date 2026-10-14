@@ -676,6 +676,7 @@ QIcon MainWindow::trayDigitsIcon(const QVector<double> &values, const QVector<bo
 
 void MainWindow::updateTrayIcon() {
     if (!trayIcon_) return;
+    refreshDiskMountLabels();
     const AppConfig c = AppConfig::load();
     const QString keys[] = {c.traySensor1, c.traySensor2, c.traySensor3, c.traySensor4};
     const double alarmFor[] = {c.trayAlarm1, c.trayAlarm2, c.trayAlarm3, c.trayAlarm4};
@@ -718,10 +719,12 @@ void MainWindow::updateTrayIcon() {
         if (parts.at(0) == QLatin1String("diskusage")) {
             // diskusage|<mount point>: used-capacity percentage of one disk,
             // taken from the newest collector sample (kept by refreshLatest).
+            // A sibling mount of a group (e.g. /home on the / partition)
+            // resolves to the shared entry, since both report the same number.
             if (parts.size() != 2) continue;
             const QString &mount = parts.at(1);
             for (const auto &d : latestSystem_.disks) {
-                if (d.mountPoint != mount || !std::isfinite(d.usedPct)) continue;
+                if (diskLabel(d.mountPoint) != diskLabel(mount) || !std::isfinite(d.usedPct)) continue;
                 values << d.usedPct;
                 alarms << (alarm > 0.0 && d.usedPct >= alarm);
                 tooltip << QStringLiteral("Disk %1 %2 %").arg(mount, QString::number(d.usedPct, 'f', 1));
@@ -915,8 +918,15 @@ void MainWindow::refreshLatest(){
     }
 
     // Dynamic disk cards on overview
+    refreshDiskMountLabels();
     while(auto*item=diskCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}diskCards_.clear();
-    int dc=0;for(const auto&d:x.disks){QString diskTitle=d.mountPoint;auto card=makeCard(diskTitle,diskCardsLayout_,dc/3,dc%3);
+    int dc=0;for(const auto&d:x.disks){
+        // One card per device; btrfs siblings (/, /home, /swap of one
+        // partition) share the card and show up in its label instead.
+        const QString diskFull=diskLabel(d.mountPoint);
+        QString diskTitle=diskFull.length()>24?diskFull.left(21)+"…":diskFull;
+        auto card=makeCard(diskTitle,diskCardsLayout_,dc/3,dc%3);
+        if(diskFull!=d.mountPoint)card.frame->setToolTip(tr("Shared filesystem: ")+diskFull);
         // The DB stores only the usage percentage; the capacity is constant
         // per mount and read live from the filesystem.
         QStorageInfo vol(d.mountPoint);
@@ -933,7 +943,7 @@ void MainWindow::refreshLatest(){
     QStringList diskMounts;for(const auto&d:x.disks)diskMounts<<d.mountPoint;
     bool diskSame=(diskSelector_->count()==diskMounts.size());
     if(diskSame){for(int i=0;i<diskMounts.size();++i){if(diskSelector_->itemData(i).toString()!=diskMounts[i]){diskSame=false;break;}}}
-    if(!diskSame){diskSelector_->blockSignals(true);diskSelector_->clear();for(const auto&mp:diskMounts)diskSelector_->addItem(mp,mp);int idx=diskSelector_->findData(curDisk);if(idx<0&&!diskMounts.isEmpty())idx=0;diskSelector_->setCurrentIndex(idx);diskSelector_->blockSignals(false);diskSelectionChanged();}
+    if(!diskSame){diskSelector_->blockSignals(true);diskSelector_->clear();for(const auto&mp:diskMounts)diskSelector_->addItem(diskLabel(mp),mp);int idx=diskSelector_->findData(curDisk);if(idx<0&&!diskMounts.isEmpty())idx=0;diskSelector_->setCurrentIndex(idx);diskSelector_->blockSignals(false);diskSelectionChanged();}
 
     const auto gpus=db_.latestGpus();
     while(auto*item=gpuCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}gpuCards_.clear();
@@ -1374,6 +1384,26 @@ void MainWindow::diskSelectionChanged(){
     QVector<ChartWidget::Point> usedPts; usedPts.reserve(h.size());
     for(const auto&d:h){usedPts.push_back({d.timestamp,d.usedPct});}
     diskUsage_->setSeries({{"Used",usedPts}});
+}
+
+void MainWindow::refreshDiskMountLabels() {
+    diskLabels_.clear();
+    // Live display metadata (btrfs siblings of one device): derived straight
+    // from /proc/mounts so the DB schema stays curve-data only. Empty on
+    // platforms without /proc/mounts; diskLabel() then returns bare mounts.
+    const auto groups = parseDiskMountGroups(readText("/proc/mounts"));
+    for (const auto &g : groups) {
+        if (g.extras.isEmpty()) { diskLabels_[g.primary] = g.primary; continue; }
+        QStringList members{g.primary};
+        members << g.extras;
+        const QString label = members.join(QStringLiteral(" · "));
+        diskLabels_[g.primary] = label;
+        for (const auto &e : g.extras) diskLabels_[e] = label;
+    }
+}
+
+QString MainWindow::diskLabel(const QString &mount) const {
+    return diskLabels_.value(mount, mount);
 }
 
 

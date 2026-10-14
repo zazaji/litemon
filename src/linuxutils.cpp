@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QHash>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -291,6 +292,110 @@ QVector<OomInfo> readOomEvents(int days) {
     std::sort(out.begin(), out.end(),
               [](const OomInfo &a, const OomInfo &b) { return a.timestamp > b.timestamp; });
     return out;
+}
+
+bool isUserFacingMount(const QString &mount) {
+    static const QStringList skipPrefixes = {"/sys", "/var/lib/waydroid", "/boot/efi"};
+    static const QStringList skipExact = {"/root", "/var/tmp"};
+    for (const auto &p : skipPrefixes) { if (mount.startsWith(p)) return false; }
+    for (const auto &e : skipExact) { if (mount == e) return false; }
+    return true;
+}
+
+namespace {
+// /proc/mounts escapes whitespace and control characters in paths as octal
+// sequences (\040 = space, \011 = tab, ...).
+QString decodeMountPath(const QString &raw) {
+    QString out;
+    out.reserve(raw.size());
+    for (int i = 0; i < raw.size(); ++i) {
+        if (raw.at(i) == QLatin1Char('\\') && i + 3 < raw.size()) {
+            bool ok = false;
+            const int code = raw.mid(i + 1, 3).toInt(&ok, 8);
+            if (ok && code > 0) { out.append(QChar(code)); i += 3; continue; }
+        }
+        out.append(raw.at(i));
+    }
+    return out;
+}
+
+// Same backing device: prefer "/" (the key history and tray slots already
+// use), then the shortest path, then lexicographic for stable output.
+bool preferMount(const QString &a, const QString &b) {
+    if (a == "/") return b != "/";
+    if (b == "/") return false;
+    if (a.size() != b.size()) return a.size() < b.size();
+    return a < b;
+}
+}
+
+QVector<DiskMountGroup> parseDiskMountGroups(const QString &content) {
+    // Pseudo filesystems carry no usage. Network filesystems block on statfs
+    // for as long as their server is unreachable (CIFS hard mounts: forever),
+    // so they never get a QStorageInfo. fuseblk is kept — that is how
+    // ntfs-3g local disks show up.
+    static const QStringList skipFs = {"tmpfs", "devtmpfs", "sysfs", "proc", "devpts", "cgroup", "cgroup2", "pstore", "securityfs", "debugfs", "tracefs", "fusectl", "configfs", "hugetlbfs", "mqueue", "binfmt_misc", "autofs", "rpc_pipefs", "nfsd", "overlay", "efivarfs"};
+    static const QStringList networkFs = {"cifs", "smbfs", "smb2", "nfs", "nfs4", "ceph", "afs", "ncpfs", "sshfs", "fuse.sshfs", "fuse.gvfsd-fuse", "fuse.portal", "fuse.lxcfs", "9p", "virtiofs"};
+    // device -> mount -> subvol= option (empty outside btrfs; same-device
+    // double mounts and ext4 bind aliases therefore all share the empty key).
+    QHash<QString, QHash<QString, QString>> byDevice;
+    const auto lines = content.split(QLatin1Char('\n'));
+    for (const auto &line : lines) {
+        const auto fields = line.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (fields.size() < 3) continue;
+        const QString dev = fields.at(0);
+        const QString mount = decodeMountPath(fields.at(1));
+        const QString fsType = fields.at(2);
+        if (!mount.startsWith(QLatin1Char('/'))) continue;
+        if (mount.startsWith("//")) continue; // CIFS device naming: //server/share
+        if (skipFs.contains(fsType, Qt::CaseInsensitive)) continue;
+        if (networkFs.contains(fsType, Qt::CaseInsensitive)) continue;
+        if (fsType.startsWith("fuse.", Qt::CaseInsensitive) && fsType.compare("fuseblk", Qt::CaseInsensitive) != 0) continue;
+        if (!isUserFacingMount(mount)) continue;
+        QString subvol;
+        for (int i = 3; i < fields.size(); ++i) {
+            const int idx = fields.at(i).indexOf("subvol=");
+            if (idx >= 0) {
+                subvol = fields.at(i).mid(idx + 7);
+                const int comma = subvol.indexOf(QLatin1Char(','));
+                if (comma >= 0) subvol.truncate(comma);
+                break;
+            }
+        }
+        byDevice[dev][mount] = subvol;
+    }
+    QVector<DiskMountGroup> groups;
+    groups.reserve(byDevice.size());
+    for (auto dit = byDevice.constBegin(); dit != byDevice.constEnd(); ++dit) {
+        const auto &members = dit.value();
+        DiskMountGroup g;
+        for (auto mit = members.constBegin(); mit != members.constEnd(); ++mit) {
+            if (g.primary.isEmpty() || preferMount(mit.key(), g.primary)) g.primary = mit.key();
+        }
+        for (auto mit = members.constBegin(); mit != members.constEnd(); ++mit) {
+            const QString &mount = mit.key();
+            if (mount == g.primary) continue;
+            bool alias = false;
+            // Nested under another mount of this device (bind aliases like
+            // /home/<user>/... under /home): detail of the parent, not shown.
+            for (auto nit = members.constBegin(); nit != members.constEnd() && !alias; ++nit) {
+                if (nit.key() != mount && mount.startsWith(nit.key() + QLatin1Char('/'))) alias = true;
+            }
+            // Same device + same subvolume (or no subvol at all): the
+            // identical view mounted twice, so keep only the preferred one.
+            for (auto nit = members.constBegin(); nit != members.constEnd() && !alias; ++nit) {
+                if (nit.key() != mount && nit.value() == mit.value() && preferMount(nit.key(), mount)) alias = true;
+            }
+            if (!alias) g.extras.append(mount);
+        }
+        std::sort(g.extras.begin(), g.extras.end(), preferMount);
+        groups.append(g);
+    }
+    std::sort(groups.begin(), groups.end(), [](const DiskMountGroup &a, const DiskMountGroup &b) {
+        if ((a.primary == "/") != (b.primary == "/")) return a.primary == "/";
+        return a.primary < b.primary;
+    });
+    return groups;
 }
 
 } // namespace LinuxUtils

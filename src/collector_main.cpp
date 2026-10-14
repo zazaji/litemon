@@ -62,10 +62,13 @@ static QJsonObject toJson(const SystemMetric &m) {
     o["gpus"] = gpus;
     QJsonArray disks;
     for (const auto &d : m.disks) {
+        QJsonArray extras;
+        for (const auto &e : d.extraMounts) extras.append(e);
         disks.append(QJsonObject {
             {"mount_point", d.mountPoint}, {"used_pct", jsonNumber(d.usedPct)},
             {"read_mibs", jsonNumber(d.readMiBs)},
-            {"write_mibs", jsonNumber(d.writeMiBs)}
+            {"write_mibs", jsonNumber(d.writeMiBs)},
+            {"extra_mounts", extras}
         });
     }
     o["disks"] = disks;

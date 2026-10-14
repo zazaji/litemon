@@ -288,57 +288,27 @@ double SystemCollector::raplPackagePowerW() const {
 }
 #endif // __APPLE__
 
-// For dedup: prefer "/" over any other mount point of the same device,
-// then the shortest path (bind-mount aliases like /home or /var/tmp of the
-// root filesystem would repeat identical numbers in the UI).
-static bool preferMount(const QString &a, const QString &b) {
-    if (a == "/") return b != "/";
-    if (b == "/") return false;
-    if (a.size() != b.size()) return a.size() < b.size();
-    return a < b;
-}
-
 #ifndef __APPLE__
 void SystemCollector::collectDisks(SystemMetric &m) const {
     // Parse /proc/mounts directly instead of QStorageInfo::mountedVolumes()
     // because the latter calls stat() on every mount point, which blocks on
-    // unreachable network mounts (CIFS/NFS).
-    const QStringList skipFs = {"tmpfs", "devtmpfs", "sysfs", "proc", "devpts", "cgroup", "cgroup2", "pstore", "securityfs", "debugfs", "tracefs", "fusectl", "configfs", "hugetlbfs", "mqueue", "binfmt_misc", "autofs", "rpc_pipefs", "nfsd", "overlay", "efivarfs"};
-    // Network filesystems block on statfs for as long as their server is
-    // unreachable (CIFS hard mounts: forever), so they never get a
-    // QStorageInfo. fuseblk is kept — that is how ntfs-3g local disks show up.
-    const QStringList networkFs = {"cifs", "smbfs", "smb2", "nfs", "nfs4", "ceph", "afs", "ncpfs", "sshfs", "fuse.sshfs", "fuse.gvfsd-fuse", "fuse.portal", "fuse.lxcfs", "9p", "virtiofs"};
-    QHash<QString, DiskInfo> byDevice;
-    QFile f("/proc/mounts");
-    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        const QString content = QString::fromUtf8(f.readAll());
-        const auto lines = content.split('\n');
-        for (const auto &line : lines) {
-            const auto fields = line.split(' ');
-            if (fields.size() < 3) continue;
-            const QString mount = fields[1];
-            const QString fsType = fields[2];
-            if (skipFs.contains(fsType, Qt::CaseInsensitive)) continue;
-            if (networkFs.contains(fsType, Qt::CaseInsensitive)) continue;
-            if (fsType.startsWith("fuse.", Qt::CaseInsensitive) && fsType.compare("fuseblk", Qt::CaseInsensitive) != 0) continue;
-            if (mount.startsWith("//")) continue; // CIFS device naming: //server/share
-            if (mount.startsWith("/boot/efi") || mount.startsWith("/sys/") || mount.startsWith("/var/lib/waydroid")) continue;
-            // Use QStorageInfo only for the specific mount, not all volumes
-            QStorageInfo vol(mount);
-            if (!vol.isValid() || !vol.isReady()) continue;
-            if (vol.bytesTotal() <= 0) continue;
-            DiskInfo di;
-            di.mountPoint = mount;
-            di.usedPct = static_cast<double>(vol.bytesTotal() - vol.bytesAvailable())
-                / static_cast<double>(vol.bytesTotal()) * 100.0;
-            const QString dev = QString::fromLocal8Bit(vol.device());
-            const auto it = byDevice.find(dev);
-            if (it == byDevice.end()) { byDevice.insert(dev, di); }
-            else if (preferMount(mount, it->mountPoint)) { it->mountPoint = mount; }
-        }
-    }
+    // unreachable network mounts (CIFS/NFS). Grouping/filtering lives in
+    // LinuxUtils so the GUI labels mounts with the same rule the collector
+    // stores by (one entry per device; btrfs siblings become extras).
+    const auto groups = parseDiskMountGroups(readText("/proc/mounts"));
     m.disks.clear();
-    for (const auto &d : byDevice) { m.disks.append(d); }
+    m.disks.reserve(groups.size());
+    for (const auto &g : groups) {
+        QStorageInfo vol(g.primary);
+        if (!vol.isValid() || !vol.isReady()) continue;
+        if (vol.bytesTotal() <= 0) continue;
+        DiskInfo di;
+        di.mountPoint = g.primary;
+        di.usedPct = static_cast<double>(vol.bytesTotal() - vol.bytesAvailable())
+            / static_cast<double>(vol.bytesTotal()) * 100.0;
+        di.extraMounts = g.extras;
+        m.disks.append(di);
+    }
     // Fallback when /proc/mounts was unreadable: at least show root.
     if (m.disks.isEmpty()) {
         QStorageInfo root = QStorageInfo::root();
