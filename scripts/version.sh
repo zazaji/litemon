@@ -7,19 +7,23 @@
 # compiling, so no binary is ever produced twice under the same version.
 #
 # Usage:
-#   scripts/version.sh            # print current version
-#   scripts/version.sh bump       # X.Y.Z -> X.Y.(Z+1), print new version
-#   scripts/version.sh set X.Y.Z  # set an explicit version
+#   scripts/version.sh                        # print current version
+#   scripts/version.sh bump [major|minor|patch]  # bump one field (default patch), print new version
+#   scripts/version.sh set X.Y.Z              # set an explicit version
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION_FILE="$ROOT/VERSION"
 
 current() { sed 's/[[:space:]]//' "$VERSION_FILE"; }
 
-bump_one() { # X.Y.Z -> X.Y.(Z+1)
-    local major minor patch
+bump_one() { # X.Y.Z [major|minor|patch] -> bumped version
+    local part="${2:-patch}" major minor patch
     IFS=. read -r major minor patch <<< "$1"
-    printf '%s.%s.%s' "$major" "$minor" "$((patch + 1))"
+    case "$part" in
+        major) printf '%s.0.0' "$((major + 1))" ;;
+        minor) printf '%s.%s.0' "$major" "$((minor + 1))" ;;
+        patch) printf '%s.%s.%s' "$major" "$minor" "$((patch + 1))" ;;
+    esac
 }
 
 cmd="${1:-current}"
@@ -28,7 +32,7 @@ case "$cmd" in
         current
         ;;
     bump)
-        new="$(bump_one "$(current)")"
+        new="$(bump_one "$(current)" "${2:-patch}")"
         printf '%s\n' "$new" > "$VERSION_FILE"
         echo "$new"
         ;;

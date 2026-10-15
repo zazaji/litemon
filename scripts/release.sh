@@ -15,6 +15,8 @@
 #
 # Usage:
 #   scripts/release.sh                # full release (patch bump + tag + push)
+#   scripts/release.sh --minor        # minor bump: 2.1.9 -> 2.2.0
+#   scripts/release.sh --major        # major bump: 1.9.9 -> 2.0.0
 #   scripts/release.sh --skip-build   # skip local build/test before tagging
 #   scripts/release.sh --dry-run      # precheck + bump + build only, no push
 set -euo pipefail
@@ -24,10 +26,12 @@ REPO="zazaji/litemon"
 REMOTE_HOST="home113"
 REMOTE_STAGE="/tmp/litemon-release"
 
-DRY=0; SKIP_BUILD=0
+DRY=0; SKIP_BUILD=0; BUMP_PART=patch
 for a in "$@"; do
     case "$a" in
         --dry-run) DRY=1 ;;
+        --minor) BUMP_PART=minor ;;
+        --major) BUMP_PART=major ;;
         --skip-build) SKIP_BUILD=1 ;;
         *) echo "unknown arg: $a (supported: --dry-run --skip-build)" >&2; exit 2 ;;
     esac
@@ -56,7 +60,7 @@ git fetch origin master --quiet
 }
 
 OLD_VERSION="$(scripts/version.sh current)"
-NEW_VERSION="$(scripts/version.sh bump)"
+NEW_VERSION="$(scripts/version.sh bump "$BUMP_PART")"
 echo "version: ${OLD_VERSION} -> ${NEW_VERSION}"
 TAG="v${NEW_VERSION}"
 
