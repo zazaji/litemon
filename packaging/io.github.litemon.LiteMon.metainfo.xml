@@ -11,5 +11,5 @@
   <launchable type="desktop-id">io.github.litemon.LiteMon.desktop</launchable>
   <provides><binary>litemon</binary></provides>
   <categories><category>System</category><category>Monitor</category></categories>
-  <releases><release version="2.1.7" date="2026-10-13"/></releases>
+  <releases><release version="2.2.0" date="2026-10-15"/></releases>
 </component>
