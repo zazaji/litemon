@@ -42,7 +42,7 @@ private slots:
     void toggleCollection();
 
 private:
-    struct Card { QLabel *value=nullptr; QLabel *detail=nullptr; QWidget *frame=nullptr; };
+    struct Card { QLabel *value=nullptr; QLabel *detail=nullptr; QWidget *frame=nullptr; QLabel *title=nullptr; };
     Card makeCard(const QString &title, QGridLayout *grid, int row, int col, int minHeight = 120);
     QWidget *makeHistoryPage(ChartWidget **a, ChartWidget **b);
     void refreshSensors();
@@ -100,9 +100,15 @@ private:
     Card cpuCard_,memCard_,netCard_,batteryCard_,pressureCard_,topProcCard_,fansCard_;
     QLabel *batteryReadout_=nullptr;
     QHash<QString,Card> gpuCards_;
+    // Mount/device id order backing the card grids; refreshLatest() rebuilds
+    // the cards only when this order changes and otherwise reuses widgets.
+    // The sentinel entry keeps the very first refresh (even with an empty
+    // device list) from matching the default and skipping the placeholder.
+    QStringList gpuCardOrder_{QString()};
     QWidget *gpuCardsContainer_=nullptr;
     QGridLayout *gpuCardsLayout_=nullptr;
     QHash<QString,Card> diskCards_;
+    QStringList diskCardOrder_{QString()};
     QWidget *diskCardsContainer_=nullptr;
     QGridLayout *diskCardsLayout_=nullptr;
     // Live mount table labels ("/ · /home · /swap" for btrfs siblings of one

@@ -82,9 +82,10 @@ PsiValues parsePsiContent(const QString &content) {
     PsiValues out;
     // Format: "some avg10=0.00 avg300=0.00 avg600=0.00 avg20=0.00"
     //         "full avg10=0.00 ..." (absent on the cpu resource)
+    static const QRegularExpression wsRe(QStringLiteral("\\s+"));
     const auto lines = content.split('\n', Qt::SkipEmptyParts);
     for (const auto &line : lines) {
-        const auto tok = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        const auto tok = line.split(wsRe, Qt::SkipEmptyParts);
         if (tok.size() < 2) continue;
         double *target = nullptr;
         if (tok[0] == "some") target = &out.some;
@@ -124,7 +125,8 @@ std::optional<qint64> parseProcStatusSwap(const QString &content) {
     const auto pos = static_cast<qsizetype>(content.indexOf(QLatin1String("VmSwap:")));
     if (pos < 0) return std::nullopt;
     // The separator after "VmSwap:" is whitespace (usually tabs).
-    const auto tok = content.mid(pos + 7).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    static const QRegularExpression wsRe(QStringLiteral("\\s+"));
+    const auto tok = content.mid(pos + 7).split(wsRe, Qt::SkipEmptyParts);
     if (tok.isEmpty()) return std::nullopt;
     bool ok = false;
     const qint64 kb = tok[0].toLongLong(&ok);

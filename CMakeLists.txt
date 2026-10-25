@@ -15,7 +15,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Optimize for size in Release builds
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(CMAKE_CXX_FLAGS_RELEASE "-Os")
-    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections")
+    # Dead-code stripping: gc-sections only discards something when each
+    # function/object lands in its own section at compile time.
+    string(APPEND CMAKE_CXX_FLAGS_RELEASE " -ffunction-sections -fdata-sections")
+    # Executables, not shared libs, are the only link targets here; Apple's
+    # ld64 has no --gc-sections, so keep the flag off the macOS cross build.
+    if(NOT APPLE)
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-Wl,--gc-sections")
+        set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections")
+    endif()
+    # Cross-TU inlining/dead-code elimination for native release builds; the
+    # osxcross/mingw toolchains stay on the safe non-LTO default.
+    if(NOT CMAKE_CROSSCOMPILING)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    endif()
 endif()
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC OFF)

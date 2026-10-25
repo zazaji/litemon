@@ -20,8 +20,33 @@ QString AppConfig::configPath() {
     return base + "/litemon.ini";
 }
 
+// load() runs on every GUI refresh tick (and once more inside every history
+// query's source-table pick), dozens of INI parses per minute. The parsed
+// result is cached and invalidated by path/mtime/size so external edits are
+// still picked up; save() drops the cache so a fresh dialog value applies on
+// the very next load in the same process.
+namespace {
+struct ConfigStamp {
+    QString path;
+    QDateTime mtime;
+    qint64 size = -1;
+    bool operator==(const ConfigStamp &o) const {
+        return size == o.size && path == o.path && mtime == o.mtime;
+    }
+};
+ConfigStamp g_stamp;
+AppConfig g_cached;
+bool g_cachedValid = false;
+} // namespace
+
 AppConfig AppConfig::load() {
-    QSettings s(configPath(), QSettings::IniFormat);
+    const QString path = configPath();
+    const QFileInfo fi(path);
+    // Stamp before parsing: a write racing the parse leaves an older stamp,
+    // so the next load() re-reads instead of pinning the torn result.
+    const ConfigStamp stamp{path, fi.lastModified(), fi.size()};
+    if (g_cachedValid && stamp == g_stamp) return g_cached;
+    QSettings s(path, QSettings::IniFormat);
     AppConfig c;
     c.sampleIntervalSec = std::clamp(s.value("sampling/system_seconds", c.sampleIntervalSec).toInt(), 60, 300);
     c.gpuIntervalSec = std::clamp(s.value("sampling/gpu_seconds", c.gpuIntervalSec).toInt(), 60, 600);
@@ -63,6 +88,9 @@ AppConfig AppConfig::load() {
     const QString t = s.value("ui/theme").toString();
     c.theme = (t == "light" || t == "dark") ? t : "system";
     c.autostart = s.value("ui/autostart", c.autostart).toBool();
+    g_stamp = stamp;
+    g_cached = c;
+    g_cachedValid = true;
     return c;
 }
 
@@ -89,6 +117,9 @@ void AppConfig::save() const {
     s.setValue("ui/theme", theme);
     s.setValue("ui/autostart", autostart);
     s.sync();
+    // The on-disk content just changed under the stamp; drop the cache so the
+    // next load() parses the saved values instead of the pre-save snapshot.
+    g_cachedValid = false;
 }
 
 QString AppConfig::autostartFilePath() {

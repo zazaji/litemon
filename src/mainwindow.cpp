@@ -185,7 +185,7 @@ MainWindow::Card MainWindow::makeCard(const QString &title,QGridLayout *grid,int
     d->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
     l->addWidget(t);l->addWidget(v);l->addWidget(d);l->addStretch(1);
     grid->addWidget(f,row,col);
-    return{v,d,f};
+    return{v,d,f,t};
 }
 
 // Appearance switch: palette switching, including a built-in dark palette.
@@ -917,16 +917,26 @@ void MainWindow::refreshLatest(){
         setNvmeTempVisible(false);
     }
 
-    // Dynamic disk cards on overview
+    // Dynamic disk cards on overview. Cards are reused across ticks and the
+    // grid is rebuilt only when the mount set changes: destroying and
+    // recreating the widgets every 2 seconds churns allocations, stylesheet
+    // parsing and layout for nothing.
     refreshDiskMountLabels();
-    while(auto*item=diskCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}diskCards_.clear();
-    int dc=0;for(const auto&d:x.disks){
+    QStringList diskCardOrder;for(const auto&d:x.disks)diskCardOrder<<d.mountPoint;
+    if(diskCardOrder_!=diskCardOrder){
+        diskCardOrder_=diskCardOrder;
+        while(auto*item=diskCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}diskCards_.clear();
         // One card per device; btrfs siblings (/, /home, /swap of one
         // partition) share the card and show up in its label instead.
+        int dc=0;for(const auto&d:x.disks){diskCards_[d.mountPoint]=makeCard(d.mountPoint,diskCardsLayout_,dc/3,dc%3);++dc;}
+        if(x.disks.isEmpty()){auto*l=new QLabel("No disk data yet.");l->setWordWrap(true);diskCardsLayout_->addWidget(l,0,0);}
+    }
+    for(const auto&d:x.disks){
+        const auto it=diskCards_.constFind(d.mountPoint);if(it==diskCards_.constEnd())continue;
+        const Card card=it.value();
         const QString diskFull=diskLabel(d.mountPoint);
-        QString diskTitle=diskFull.length()>24?diskFull.left(21)+"…":diskFull;
-        auto card=makeCard(diskTitle,diskCardsLayout_,dc/3,dc%3);
-        if(diskFull!=d.mountPoint)card.frame->setToolTip(tr("Shared filesystem: ")+diskFull);
+        card.title->setText(diskFull.length()>24?diskFull.left(21)+"…":diskFull);
+        card.frame->setToolTip(diskFull!=d.mountPoint?tr("Shared filesystem: ")+diskFull:QString());
         // The DB stores only the usage percentage; the capacity is constant
         // per mount and read live from the filesystem.
         QStorageInfo vol(d.mountPoint);
@@ -934,9 +944,7 @@ void MainWindow::refreshLatest(){
         const double usedGiB = (std::isfinite(d.usedPct) && vol.bytesTotal()>0)
             ? static_cast<double>(vol.bytesTotal())/1073741824.0 * d.usedPct / 100.0 : lmNaN();
         card.value->setText(fmtPercent(d.usedPct));
-        card.detail->setText((std::isfinite(usedGiB)?QString::number(usedGiB,'f',1):"—")+" / "+(std::isfinite(totalGiB)?QString::number(totalGiB,'f',1):"—")+" GiB");
-        diskCards_[d.mountPoint]=card;++dc;}
-    if(x.disks.isEmpty()){auto*l=new QLabel("No disk data yet.");l->setWordWrap(true);diskCardsLayout_->addWidget(l,0,0);}
+        card.detail->setText((std::isfinite(usedGiB)?QString::number(usedGiB,'f',1):"—")+" / "+(std::isfinite(totalGiB)?QString::number(totalGiB,'f',1):"—")+" GiB");}
 
     // Update disk selector for Disk page
     const QString curDisk=diskSelector_?diskSelector_->currentData().toString():QString();
@@ -946,9 +954,23 @@ void MainWindow::refreshLatest(){
     if(!diskSame){diskSelector_->blockSignals(true);diskSelector_->clear();for(const auto&mp:diskMounts)diskSelector_->addItem(diskLabel(mp),mp);int idx=diskSelector_->findData(curDisk);if(idx<0&&!diskMounts.isEmpty())idx=0;diskSelector_->setCurrentIndex(idx);diskSelector_->blockSignals(false);diskSelectionChanged();}
 
     const auto gpus=db_.latestGpus();
-    while(auto*item=gpuCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}gpuCards_.clear();
-    int c=0;for(const auto&g:gpus){QString gpuTitle=g.vendor+" · "+g.name;if(gpuTitle.length()>24)gpuTitle=gpuTitle.left(21)+"…";auto card=makeCard(gpuTitle,gpuCardsLayout_,c/3,c%3);card.value->setText(g.state=="suspended"?"Suspended":fmtPercent(g.utilization));QStringList d;d<<fmtTemp(g.temperatureC)<<fmtPower(g.powerW);if(std::isfinite(g.frequencyMHz))d<<QString::number(g.frequencyMHz,'f',0)+" MHz";if(std::isfinite(g.memoryUsedPct))d<<tr("VRAM")+" "+fmtPercent(g.memoryUsedPct);else if(g.vendor=="Intel")d<<"shared memory";card.detail->setText(d.join(" · "));gpuCards_[g.id]=card;++c;}
-    if(gpus.isEmpty()){auto*l=new QLabel("No GPU/NPU metrics yet. AMD: amdgpu driver; Intel: install intel-gpu-tools; NVIDIA: proprietary driver provides nvidia-smi; Huawei Ascend: install npu-smi.");l->setWordWrap(true);gpuCardsLayout_->addWidget(l,0,0);}
+    // Same reuse rule as the disk cards: rebuild the grid only when the
+    // device set changes, otherwise just refresh the labels.
+    QStringList gpuCardOrder;for(const auto&g:gpus)gpuCardOrder<<g.id;
+    if(gpuCardOrder_!=gpuCardOrder){
+        gpuCardOrder_=gpuCardOrder;
+        while(auto*item=gpuCardsLayout_->takeAt(0)){if(item->widget())item->widget()->deleteLater();delete item;}gpuCards_.clear();
+        int c=0;for(const auto&g:gpus){gpuCards_[g.id]=makeCard(g.id,gpuCardsLayout_,c/3,c%3);++c;}
+        if(gpus.isEmpty()){auto*l=new QLabel("No GPU/NPU metrics yet. AMD: amdgpu driver; Intel: install intel-gpu-tools; NVIDIA: proprietary driver provides nvidia-smi; Huawei Ascend: install npu-smi.");l->setWordWrap(true);gpuCardsLayout_->addWidget(l,0,0);}
+    }
+    for(const auto&g:gpus){
+        const auto it=gpuCards_.constFind(g.id);if(it==gpuCards_.constEnd())continue;
+        const Card card=it.value();
+        QString gpuTitle=g.vendor+" · "+g.name;if(gpuTitle.length()>24)gpuTitle=gpuTitle.left(21)+"…";
+        card.title->setText(gpuTitle);
+        card.value->setText(g.state=="suspended"?"Suspended":fmtPercent(g.utilization));
+        QStringList d;d<<fmtTemp(g.temperatureC)<<fmtPower(g.powerW);if(std::isfinite(g.frequencyMHz))d<<QString::number(g.frequencyMHz,'f',0)+" MHz";if(std::isfinite(g.memoryUsedPct))d<<tr("VRAM")+" "+fmtPercent(g.memoryUsedPct);else if(g.vendor=="Intel")d<<"shared memory";
+        card.detail->setText(d.join(" · "));}
 
     const QString current=gpuSelector_->currentData().toString();
     const auto ids=db_.gpuIds(true); // hide signal-less devices (empty charts)

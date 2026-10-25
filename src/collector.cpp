@@ -11,9 +11,6 @@
 #include <cmath>
 
 #include <QElapsedTimer>
-#include <QRegularExpression>
-#include <algorithm>
-#include <cmath>
 #include <unistd.h>
 
 namespace {
@@ -45,8 +42,9 @@ SystemCollector::SystemCollector() {
 SystemCollector::CpuTicks SystemCollector::readCpuTicks() const {
     QFile f("/proc/stat");
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
+    static const QRegularExpression wsRe(QStringLiteral("\\s+"));
     const QString line = QString::fromUtf8(f.readLine()).trimmed();
-    const auto p = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    const auto p = line.split(wsRe, Qt::SkipEmptyParts);
     if (p.size() < 5 || p[0] != "cpu") return {};
     quint64 total = 0;
     QVector<quint64> v;
@@ -332,6 +330,7 @@ SystemCollector::IoCounters SystemCollector::readNetworkCounters() const {
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
     quint64 rx = 0, tx = 0;
     // NOTE: /proc files report size 0, so atEnd() cannot drive the loop.
+    static const QRegularExpression wsRe(QStringLiteral("\\s+"));
     const QString content = QString::fromUtf8(f.readAll());
     const auto lines = content.split('\n');
     for (const auto &line : lines) {
@@ -342,7 +341,7 @@ SystemCollector::IoCounters SystemCollector::readNetworkCounters() const {
         const QFileInfo fi("/sys/class/net/" + iface);
         const QString real = fi.canonicalFilePath();
         if (real.contains("/devices/virtual/net/")) continue; // avoid VPN/bridge double counting
-        const auto fields = line.mid(colon + 1).split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        const auto fields = line.mid(colon + 1).split(wsRe, Qt::SkipEmptyParts);
         if (fields.size() < 16) continue;
         bool ok1=false, ok2=false;
         const quint64 r = fields[0].toULongLong(&ok1);
@@ -358,10 +357,11 @@ QVector<SystemCollector::DiskIoCounters> SystemCollector::readDiskCounters() con
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
     QVector<DiskIoCounters> result;
     // NOTE: /proc files report size 0, so atEnd() cannot drive the loop.
+    static const QRegularExpression wsRe(QStringLiteral("\\s+"));
     const QString content = QString::fromUtf8(f.readAll());
     const auto lines = content.split('\n');
     for (const auto &lineStr : lines) {
-        const auto fields = lineStr.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        const auto fields = lineStr.split(wsRe, Qt::SkipEmptyParts);
         if (fields.size() < 10) continue;
         const QString dev = fields[2];
         if (dev.startsWith("loop") || dev.startsWith("ram") || dev.startsWith("dm-") || dev.startsWith("md")) continue;
